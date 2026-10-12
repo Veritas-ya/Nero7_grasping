@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-12",
+  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+  "python": "3.10.12",
+  "numpy": "1.26.4",
+  "scipy": "1.15.3",
+  "opencv": "4.5.4",
+  "resolution": [
+    320,
+    240
+  ],
+  "OpenBLAS_threads": 1,
+  "OMP_threads": 1,
+  "OpenCV_threads": 1,
+  "dataset_frames": 60,
+  "empty_frames": 15,
+  "simulated_speed_m_s": 0.028,
+  "note": "Only synthetic/offline experiments. No physical-camera accuracy, live ROS FPS, or robot execution claimed."
+}

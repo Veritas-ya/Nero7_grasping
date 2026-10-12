@@ -1,0 +1,62 @@
+block_detector:
+  ros__parameters:
+    # ---------------- 话题与接口配置 ----------------
+    color_topic: "/camera/color/image_raw"
+    points_topic: "/camera/depth/points"
+    color_camera_info: "/camera/color/camera_info"
+    depth_topic: "/camera/depth/image_raw"
+    # ROS 2 QoS 与对齐模式 (best_effort / reliable)
+    qos_reliability: "best_effort"
+    alignment_mode: "aligned_topic"
+
+    # ---------------- HSV 色彩分割与分割阈值 (针对绿色传送带) ----------------
+    # 传送带绿色的 HSV 范围 [H, S, V] (OpenCV 格式: H 0-180, S 0-255, V 0-255)
+    lower_green: [35, 40, 40]
+    upper_green: [85, 255, 255]
+
+    # 物块在图像中的最小像素面积 (小于此值的噪点会被自动剔除)
+    min_area_px: 200
+
+    # 感兴趣区域 (ROI) 裁剪: [u0, v0, u1, v1]
+    # 若设为 [0, 0, 0, 0] 则默认使用全图；设置后可进一步过滤传送带外的背景
+    roi_px: [0, 0, 0, 0]
+
+    # ---------------- 机械臂工作空间限制 (base_link 坐标系，单位：米) ----------------
+    # 只有当识别到的物块 3D 坐标落在该边界框内时才会被保留，用于过滤误报和机械臂无法到达的区域
+    workspace_x: [-0.7, 0.7]
+    workspace_y: [-0.7, 0.7]
+    workspace_z: [-0.25, 0.15]
+
+    # ---------------- 坐标系与配置文件 ----------------
+    base_frame: "base_link"
+    camera_optical_frame: "camera_color_optical_frame"
+    
+    # 外部标定与传送带参数文件位置 (可选)
+    belt_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml"
+    calibration_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml"
+
+    # ---------------- 多目标追踪器 (BlockTracker) 参数 ----------------
+    tracker_max_vel: 0.15          # 最大容许预测速度 (m/s)
+    tracker_gate_radius: 0.03      # 匹配前后帧物体的最大距离门限 (3 cm)
+    tracker_confirm_frames: 2      # 连续检测到多少帧后将状态标记为已确认 (CONFIRMED)
+    tracker_lost_frames: 6         # 短暂遮挡时保留 ID；超过这个丢帧数删除
+    tracker_lost_timeout: 0.5      # 距最后有效观测的绝对超时 (秒)，包括相机长间断
+
+    # XY 匀速卡尔曼滤波：速度来自实测 RGB-D 位置，不使用给定带速
+    speed_window_s: 0.6            # 速度有效性所需的近期有效观测窗口 (秒)
+    speed_min_samples: 8           # 不能把同一帧/预测位置计为新观测
+    speed_min_span: 0.3            # 有效观测至少覆盖的时间 (秒)
+    kalman_measurement_std: 0.002  # 每轴位置测量噪声标准差 (m)，不是精度保证
+    # 连续白噪声加速度谱密度的平方根，单位 m/s^(3/2)
+    # 沿带允许带速变化；垂直带方向的物体运动约束更强
+    kalman_accel_noise_std: 0.002
+    kalman_cross_accel_noise_std: 0.0005
+    kalman_initial_velocity_std: 0.10  # 新目标初始速度不确定性 (m/s)
+    kalman_innovation_gate: 9.210340371976184  # XY 两自由度 χ² 99% 创新门限
+    kalman_max_velocity_std: 0.010 # 最大速度标准差 (m/s)；最终截取还须检查预测协方差
+    kalman_observation_max_age: 0.15 # 短暂丢帧可预测；超过则 speed_valid=false
+    kalman_qualification_gap: 0.3 # 长间断后必须重新积累独立观测
+
+    # ---------------- 调试日志与图像发布 ----------------
+    publish_debug: true
+    debug_topic: "/perception/debug_image"

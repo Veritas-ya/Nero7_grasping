@@ -1,0 +1,221 @@
+{
+  "provenance": "synthetic ray rendering; axial sigma=0.8 mm; 1% depth dropout",
+  "frames": 60,
+  "empty_frames": 15,
+  "image_size": [
+    320,
+    240
+  ],
+  "geometry_units": "m",
+  "annotated": true,
+  "timing_scope": "offline detection only, excluding ROS/registration/tracking; not live FPS",
+  "plane_calibration": {
+    "fixed": {
+      "error": "Horizontal assumption failed: tilt=0.03460 rad, p95=0.00783 m; inspect TF or use ransac3d"
+    },
+    "ransac3d": {
+      "sample_count": 5000,
+      "inlier_count": 5000,
+      "inlier_ratio": 1.0,
+      "residual_std_m": 0.0007785054596805837,
+      "residual_p95_m": 0.0015209133677015856,
+      "tilt_rad": 0.034599746496748955,
+      "slope_x": 0.034613539786306255,
+      "slope_y": -3.745703561069701e-05,
+      "xy_span_m": [
+        0.48151592435785756,
+        0.5935337573289872
+      ],
+      "frame_count": 15,
+      "frame_height_spread_m": 4.827881551401034e-05,
+      "median_base_z_m": -0.12416838168237354,
+      "fixed_height_std_m": 0.004528619541040714,
+      "fixed_height_p95_m": 0.007831128187035142,
+      "height_by_xy_bins": [
+        {
+          "count": 369,
+          "xy_m": [
+            -0.7936285482994894,
+            0.01282120048999788
+          ],
+          "median_z_m": -0.13081471015455626,
+          "std_z_m": 0.0013838462387982086
+        },
+        {
+          "count": 420,
+          "xy_m": [
+            -0.7904464207653192,
+            0.20282338390747706
+          ],
+          "median_z_m": -0.13056159856892663,
+          "std_z_m": 0.0013470697628006735
+        },
+        {
+          "count": 376,
+          "xy_m": [
+            -0.7899564688395915,
+            0.3949419247110685
+          ],
+          "median_z_m": -0.13045070215540489,
+          "std_z_m": 0.001309246088544312
+        },
+        {
+          "count": 550,
+          "xy_m": [
+            -0.64613553577954,
+            0.021940938830375692
+          ],
+          "median_z_m": -0.12553127598484998,
+          "std_z_m": 0.0018582937773265465
+        },
+        {
+          "count": 635,
+          "xy_m": [
+            -0.6433568261500546,
+            0.19222674429416658
+          ],
+          "median_z_m": -0.125381372764658,
+          "std_z_m": 0.0017623812536766055
+        },
+        {
+          "count": 586,
+          "xy_m": [
+            -0.6550229581731069,
+            0.38314281741778056
+          ],
+          "median_z_m": -0.12585146241498163,
+          "std_z_m": 0.0017987902690127285
+        },
+        {
+          "count": 615,
+          "xy_m": [
+            -0.4875859351699248,
+            0.021998066902160662
+          ],
+          "median_z_m": -0.12006881570942252,
+          "std_z_m": 0.0018139597510766498
+        },
+        {
+          "count": 842,
+          "xy_m": [
+            -0.4851885587373954,
+            0.20507248640060427
+          ],
+          "median_z_m": -0.11981602375476541,
+          "std_z_m": 0.0018100758498890567
+        },
+        {
+          "count": 607,
+          "xy_m": [
+            -0.4877548953885028,
+            0.3735306751728058
+          ],
+          "median_z_m": -0.11990924838966177,
+          "std_z_m": 0.0018372967927614851
+        }
+      ],
+      "normal": [
+        -0.03459282318411328,
+        3.7434617143505686e-05,
+        0.9994014884833833
+      ],
+      "offset": 0.10302614634952117,
+      "calibration_ms": 66.17779899988818
+    }
+  },
+  "modes": {
+    "legacy_depth": {
+      "detection_ms_mean": 0.9709284667223983,
+      "detection_ms_p95": 6.02554845022496,
+      "rejected_frames": 0,
+      "rejection_reasons": {},
+      "offline_detection_fps": 1029.9419929212083,
+      "detection_count_min": 0,
+      "detection_count_max": 1,
+      "empty_false_positives": 0,
+      "observed_unique_track_ids": 1,
+      "qualified_speed_samples": 35,
+      "true_positives": 45,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "position_rmse_m": 0.0014983149350581188,
+      "height_mae_m": 0.003661579438484243,
+      "speed_mae_m_s": 0.00024279585286853087,
+      "id_switches": 0
+    },
+    "depth_plane/fixed": {
+      "skipped": "Plane calibration rejected"
+    },
+    "rgb/fixed": {
+      "skipped": "Plane calibration rejected"
+    },
+    "rgb_depth/fixed": {
+      "skipped": "Plane calibration rejected"
+    },
+    "depth_plane/ransac3d": {
+      "detection_ms_mean": 0.8013032499851155,
+      "detection_ms_p95": 0.8477688004859374,
+      "rejected_frames": 0,
+      "rejection_reasons": {},
+      "offline_detection_fps": 1247.9669838086584,
+      "detection_count_min": 0,
+      "detection_count_max": 1,
+      "empty_false_positives": 0,
+      "observed_unique_track_ids": 1,
+      "qualified_speed_samples": 35,
+      "true_positives": 45,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "position_rmse_m": 0.0015646645502593905,
+      "height_mae_m": 0.0003469872796557615,
+      "speed_mae_m_s": 0.00024309315464007006,
+      "id_switches": 0
+    },
+    "rgb/ransac3d": {
+      "detection_ms_mean": 0.685288516615401,
+      "detection_ms_p95": 0.7323985004859423,
+      "rejected_frames": 0,
+      "rejection_reasons": {},
+      "offline_detection_fps": 1459.2393944362882,
+      "detection_count_min": 0,
+      "detection_count_max": 1,
+      "empty_false_positives": 0,
+      "observed_unique_track_ids": 1,
+      "qualified_speed_samples": 35,
+      "true_positives": 45,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "position_rmse_m": 0.0014422117391549119,
+      "height_mae_m": 0.00016413663645600278,
+      "speed_mae_m_s": 0.0001930496767023612,
+      "id_switches": 0
+    },
+    "rgb_depth/ransac3d": {
+      "detection_ms_mean": 1.0560609832888683,
+      "detection_ms_p95": 1.1038795502372523,
+      "rejected_frames": 0,
+      "rejection_reasons": {},
+      "offline_detection_fps": 946.9150132653525,
+      "detection_count_min": 0,
+      "detection_count_max": 1,
+      "empty_false_positives": 0,
+      "observed_unique_track_ids": 1,
+      "qualified_speed_samples": 35,
+      "true_positives": 45,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "position_rmse_m": 0.0014422117391549119,
+      "height_mae_m": 0.00016413663645600278,
+      "speed_mae_m_s": 0.0001930496767023612,
+      "id_switches": 0
+    }
+  }
+}

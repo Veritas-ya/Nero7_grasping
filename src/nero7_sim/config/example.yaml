@@ -1,0 +1,28 @@
+# Simulator mechanics only. The perception/controller never receive belt_speed
+# or the simulator's object poses; they estimate motion from rendered RGB-D.
+belt_speed: 0.028
+# Leave rendering/vision CPU headroom. All motion budgets use simulation time.
+real_time_factor: 0.25
+initial_joints: [-0.4449193, 0.276879, -0.4254938, 2.0089263, 2.5207441, 0.5516288, -0.2842443]
+speed_percent: 20
+cartesian_speed_at_100_percent: 0.14
+joint_speed_at_100_percent: 3.0
+gripper_speed: 0.20
+camera_width: 1640
+camera_height: 720
+# Example intrinsics (hardware CameraInfo was not saved in the project).
+# Wide upstream coverage is required by the measured multi-second motion budget.
+camera_fx: 775.0
+camera_rate: 30.0
+roi_px: [0, 355, 1480, 475]
+object_size: [0.060, 0.030, 0.045]
+# This example block's network direction is measured with this yaw timing.
+closing_yaw: -1.40
+object_yaw: 3.014981835244229
+spawn_distance_upstream: 0.48
+# This example belt has exact constant speed and no slip. These noise densities
+# apply only to simulation; hardware filter defaults are left unchanged.
+kalman_accel_noise_std: 0.00015
+kalman_cross_accel_noise_std: 0.00008
+# Ideal servo repeatability assumption; hardware keeps its 0.15 s default.
+conveyor_timing_std: 0.03

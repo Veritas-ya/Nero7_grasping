@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from nero7_sim.camera_sync import main
+main()

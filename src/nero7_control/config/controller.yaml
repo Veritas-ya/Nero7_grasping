@@ -1,0 +1,65 @@
+# nero7_control node parameters
+grasp_controller:
+  ros__parameters:
+    # --- arm backend: 'ros_topic' (agx_arm_ctrl node) or 'sdk' (pyAgxArm direct) ---
+    backend: ros_topic
+    topic_prefix: ''
+
+    # --- camera topics for inference crops (M0 verified 2026-09-29) ---
+    tracks_topic: /perception/tracks
+    color_topic: /camera/color/image_raw
+    # depth_registration:=true 时对齐深度（1280x720 彩色网格）在此话题
+    depth_topic: /camera/depth/image_raw
+    color_camera_info: /camera/color/camera_info
+    qos_reliability: best_effort
+    base_frame: base_link
+    camera_optical_frame: camera_color_optical_frame
+
+    # 所有抓取任务默认自动打开物块测速图像窗口；无桌面时仅保留图像话题
+    visualization_enabled: true
+    visualization_topic: /perception/debug_image
+
+    # --- GR-ConvNet ---
+    model_path: /home/ubuntu22/grasp/robotic-grasping/trained-models/jacquard-rgbd-grconvnet3-drop0-ch32
+    infer_max_rate: 10.0
+    result_max_age: 0.2
+    q_threshold: 0.25
+
+    # --- belt ---
+    belt_file: /home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml
+
+    # --- fsm ---
+    approach_height: 0.08
+    descend_offset: 0.04
+    lift_height: 0.12
+    t_approach: 1.5
+    tau_desc: 0.5
+    k_lead: 0.05
+    gate_tol: 0.02
+    abort_tol: 0.025
+    yaw_off: 0.0
+    grasp_roll: 3.14159
+    grasp_pitch: 0.0
+    fallback_width_mm: 40.0
+    gripper_force: 1.0
+    speed_min: 0.01
+    speed_max: 0.10
+    timeout_approach: 3.0
+    timeout_wait: 5.0
+    timeout_descend: 2.0
+    timeout_grasp: 1.5
+    timeout_lift: 3.0
+    timeout_place: 10.0
+    miss_halt_threshold: 3
+    dry_run: false
+    fsm_rate: 50.0
+
+    # --- placement (taught poses; M2 fill in) ---
+    bin_pre_joints: []   # 7 joint angles above the bin
+    bin_drop_pose: []    # [x,y,z,roll,pitch,yaw] drop pose
+
+    # --- safety ---
+    workspace: {x_min: -0.45, x_max: 0.45, y_min: -0.35, y_max: 0.35, z_min: -0.05}
+    max_target_step: 0.35
+    feedback_timeout: 0.2   # arm feedback watchdog (s)
+    arm_speed_percent: 50   # only used by the sdk backend

@@ -1,0 +1,10 @@
+# Visual trajectory and live depth geometry, 2026-10-09.
+# Grasp line still requires the moving-object trial.
+belt_direction:
+- 0.017013842307458584
+- -0.999855254109282
+belt_origin:
+- -0.4001137037241609
+- -0.006808456956382769
+gate_s: -0.21592568145716382
+belt_height: -0.10286622820279956

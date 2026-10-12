@@ -1,0 +1,110 @@
+block_detector:
+  ros__parameters:
+    # ---------------- 话题与接口配置 ----------------
+    color_topic: "/camera/color/image_raw"
+    points_topic: "/camera/depth/points"
+    color_camera_info: "/camera/color/camera_info"
+    depth_topic: "/camera/depth/image_raw"
+    # 必须是已注册到彩色光学系的深度及其 CameraInfo；尺寸/坐标系/内参不符即拒绝
+    depth_camera_info: "/camera/depth/camera_info"
+    # ROS 2 QoS 与对齐模式 (best_effort / reliable)
+    qos_reliability: "best_effort"
+    alignment_mode: "aligned_topic"
+
+    # 新模式在空载标定、离线验证完成后显式启用；默认保留旧分割作为对照
+    # legacy_depth / depth_plane / rgb / rgb_depth
+    detection_mode: "legacy_depth"
+    # fixed: base Z=h；ransac3d: 单位法向量的真实三维平面
+    plane_mode: "fixed"
+    plane_file: ""
+    plane_calibration_enabled: false
+    # 必须现场选择仅含空载绿色带面的区域；全零不允许用于新平面标定
+    plane_roi_px: [0, 0, 0, 0]
+    plane_calibration_frames: 15
+    plane_calibration_max_points: 5000
+    plane_ransac_distance: 0.006
+    plane_ransac_min_ratio: 0.4   # 原算法基准；新三维标定使用 base_plane_min_ratio
+    plane_refresh_every: 10     # 仅 legacy_depth 实时重拟合
+    base_plane_min_ratio: 0.7
+    plane_max_tilt_rad: 0.01
+    plane_max_3d_tilt_rad: 0.2
+    plane_max_flat_residual_m: 0.006
+    plane_max_height_spread_m: 0.004
+    plane_min_xy_span_m: 0.05
+    # 仅作为粗略排除支架/机械臂的高度先验，不直接作为新平面估计结果
+    plane_height_hint_enabled: true
+    plane_height_hint: -0.10286622820279956
+    plane_height_hint_tolerance_m: 0.03
+    plane_empty_gray_max_ratio: 0.005
+    sync_max_delta_s: 0.02
+    image_max_age_s: 0.2
+    sync_buffer_size: 8
+    color_rectified: false
+    # 原经验像素平移默认停用；不能替代几何注册，且网络深度未应用这一平移
+    apply_d2c_offset: false
+
+    # ---------------- HSV 色彩分割与分割阈值 (针对绿色传送带) ----------------
+    # 传送带绿色的 HSV 范围 [H, S, V] (OpenCV 格式: H 0-180, S 0-255, V 0-255)
+    lower_green: [35, 40, 40]
+    upper_green: [85, 255, 255]
+    gray_saturation_max: 70
+    gray_value_min: 35
+    gray_value_max: 245
+    depth_min_valid_pixels: 30
+    depth_frame_min_valid_ratio: 0.1
+    depth_min_valid_ratio: 0.5
+    depth_erode_px: 1
+    depth_region_mad_scale: 3.0
+    depth_region_min_band_m: 0.003
+    # rgb 模式只作宽松几何过滤；rgb_depth 使用下方 block_height_min/max
+    rgb_height_min_m: 0.0
+    rgb_height_max_m: 0.12
+
+    # 物块在图像中的最小像素面积 (小于此值的噪点会被自动剔除)
+    min_area_px: 200
+    block_height_min: 0.008     # 新模式：base Z 的垂直高度；旧模式：光轴深度差
+    block_height_max: 0.060
+
+    # 感兴趣区域 (ROI) 裁剪: [u0, v0, u1, v1]
+    # 若设为 [0, 0, 0, 0] 则默认使用全图；设置后可进一步过滤传送带外的背景
+    roi_px: [0, 0, 0, 0]
+
+    # ---------------- 机械臂工作空间限制 (base_link 坐标系，单位：米) ----------------
+    # 只有当识别到的物块 3D 坐标落在该边界框内时才会被保留，用于过滤误报和机械臂无法到达的区域
+    workspace_x: [-0.7, 0.7]
+    workspace_y: [-0.7, 0.7]
+    workspace_z: [-0.25, 0.15]
+
+    # ---------------- 坐标系与配置文件 ----------------
+    base_frame: "base_link"
+    camera_optical_frame: "camera_color_optical_frame"
+    
+    # 外部标定与传送带参数文件位置 (可选)
+    belt_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml"
+    calibration_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml"
+
+    # ---------------- 多目标追踪器 (BlockTracker) 参数 ----------------
+    tracker_max_vel: 0.15          # 最大容许预测速度 (m/s)
+    tracker_gate_radius: 0.03      # 匹配前后帧物体的最大距离门限 (3 cm)
+    tracker_confirm_frames: 2      # 连续检测到多少帧后将状态标记为已确认 (CONFIRMED)
+    tracker_lost_frames: 6         # 短暂遮挡时保留 ID；超过这个丢帧数删除
+    tracker_lost_timeout: 0.5      # 距最后有效观测的绝对超时 (秒)，包括相机长间断
+
+    # XY 匀速卡尔曼滤波：速度来自实测 RGB-D 位置，不使用给定带速
+    speed_window_s: 0.6            # 速度有效性所需的近期有效观测窗口 (秒)
+    speed_min_samples: 8           # 不能把同一帧/预测位置计为新观测
+    speed_min_span: 0.3            # 有效观测至少覆盖的时间 (秒)
+    kalman_measurement_std: 0.002  # 每轴位置测量噪声标准差 (m)，不是精度保证
+    # 连续白噪声加速度谱密度的平方根，单位 m/s^(3/2)
+    # 沿带允许带速变化；垂直带方向的物体运动约束更强
+    kalman_accel_noise_std: 0.002
+    kalman_cross_accel_noise_std: 0.0005
+    kalman_initial_velocity_std: 0.10  # 新目标初始速度不确定性 (m/s)
+    kalman_innovation_gate: 9.210340371976184  # XY 两自由度 χ² 99% 创新门限
+    kalman_max_velocity_std: 0.010 # 最大速度标准差 (m/s)；最终截取还须检查预测协方差
+    kalman_observation_max_age: 0.15 # 短暂丢帧可预测；超过则 speed_valid=false
+    kalman_qualification_gap: 0.3 # 长间断后必须重新积累独立观测
+
+    # ---------------- 调试日志与图像发布 ----------------
+    publish_debug: true
+    debug_topic: "/perception/debug_image"

@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>nero7_control</name>
+  <version>0.1.0</version>
+  <description>Arm control, GR-ConvNet inference and grasp state machine for the Nero7 conveyor grasping system.</description>
+  <maintainer email="ubuntu22@todo.todo">ubuntu22</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>cv_bridge</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>nero7_msgs</depend>
+  <depend>agx_arm_msgs</depend>
+
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-torch</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>rqt_image_view</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
