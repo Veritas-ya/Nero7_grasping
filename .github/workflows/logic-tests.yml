@@ -28,6 +28,7 @@ jobs:
       - name: Run hardware independent regressions
         run: >-
           python -m pytest -q
+          tests/test_controller_boundaries.py
           src/nero7_control/test/test_fsm_regressions.py
           src/nero7_control/test/test_plan_validity.py
           src/nero7_control/test/test_conveyor_prediction.py
@@ -36,4 +37,4 @@ jobs:
           src/nero7_perception/test/test_kalman_motion.py
           src/nero7_perception/test/test_visual_speed.py
           src/nero7_perception/test/test_depth_center.py
-          src/nero7_perception/test/test_speed_overlay.py
+          src/nero7_perception/test/test_debug_overlay_regressions.py
