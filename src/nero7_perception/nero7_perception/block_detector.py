@@ -20,7 +20,7 @@ from .alignment import make_depth_source
 from .geometry import CameraGeometry, check_transform
 from .base_plane import (EmptyBeltCalibration, load_plane, save_plane,
                          plane_context, check_plane_context, archive_plane)
-from .detection import (DETECTION_DEFAULTS, validate_detection_config, calibration_points,
+from .detection import (DETECTION_DEFAULTS, validate_detection_config, resolve_detection_paths, calibration_points,
                         detect_blocks, detect_legacy)
 from .conveyor_model import BeltPlane, BeltModel
 from .block_tracker import BlockTracker
@@ -84,11 +84,15 @@ class BlockDetectorNode(Node):
             ('camera_optical_frame', 'camera_color_optical_frame'),
             ('publish_debug', True),
             ('debug_topic', '/perception/debug_image'),
-            ('belt_file', '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml'),
-            ('calibration_file', '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml'),
+            ('belt_file', ''),
+            ('calibration_file', ''),
         ] + list(DETECTION_DEFAULTS.items()):
-            params[name] = self.declare_parameter(name, file_params.get(name, default)).value
+            value = file_params.get(name, default)
+            if name in ('belt_file', 'calibration_file') and not value:
+                value = resolve_detection_paths(file_params, p or None)[name]
+            params[name] = self.declare_parameter(name, value).value
 
+        params = resolve_detection_paths(params, p or None)
         validate_detection_config(params)
         if (not np.isfinite([params['processing_rate_hz'], params['debug_rate_hz']]).all()
                 or params['processing_rate_hz'] <= 0 or params['debug_rate_hz'] <= 0
@@ -122,11 +126,8 @@ class BlockDetectorNode(Node):
         # Belt model setup
         belt = {}
         if params['belt_file']:
-            try:
-                with open(params['belt_file']) as f:
-                    belt = yaml.safe_load(f) or {}
-            except OSError as e:
-                self.get_logger().warn(f'cannot read belt file: {e}')
+            with open(params['belt_file']) as f:
+                belt = yaml.safe_load(f) or {}
         self._belt = BeltModel.from_yaml(belt)
 
         # Depth-to-Color (d2c) pixel offset registration

@@ -56,5 +56,10 @@ def yaw_orientations(reference_rpy, axis_flange, yaw):
         rot = Rotation.from_euler('z', angle)*reference
         direction = rot.apply(axis)
         level = np.r_[direction[:2]/np.linalg.norm(direction[:2]), 0.]
-        correction, _ = Rotation.align_vectors([level], [direction])
+        # The one-vector SVD solution has an unconstrained twist in older
+        # SciPy versions. Use the unique minimum-angle tilt correction instead.
+        cross = np.cross(direction, level)
+        length = np.linalg.norm(cross)
+        correction = (Rotation.from_rotvec(cross/length*np.arctan2(length, direction@level))
+                      if length > 1e-12 else Rotation.identity())
         yield correction*rot

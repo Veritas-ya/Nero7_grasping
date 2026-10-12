@@ -67,7 +67,7 @@ def test_real_tracker_labels_update_and_lost_track_hides_old_speed():
 
 def test_debug_image_keeps_capture_timestamp_and_optical_frame():
     detector = BlockDetectorNode.__new__(BlockDetectorNode)
-    detector._p = dict(camera_optical_frame='camera_color_optical_frame')
+    detector._p = dict(camera_optical_frame='camera_color_optical_frame', debug_max_width=640)
     detector._color = np.zeros((480, 640, 3), np.uint8)
     detector._bridge = CvBridge()
     detector._pub_debug = Mock()

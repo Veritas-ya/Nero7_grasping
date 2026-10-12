@@ -3,6 +3,7 @@ import math
 import cv2
 import numpy as np
 import yaml
+from pathlib import Path
 
 from .geometry import roi_mask, check_transform
 
@@ -46,6 +47,27 @@ DETECTION_DEFAULTS = {
 }
 
 
+def resolve_detection_paths(params, params_path=None):
+    """Resolve default belt/calibration resources in source or isolated installs."""
+    params = dict(params)
+    source_root = Path(params_path).resolve().parent.parent.parent if params_path else None
+    for name, filename in [('belt_file', 'belt.yaml'), ('calibration_file', 'calibration.yaml')]:
+        value = params.get(name, '')
+        if value:
+            target = Path(value).expanduser()
+            if not target.is_absolute() and params_path:
+                target = Path(params_path).resolve().parent/target
+            params[name] = str(target)
+            continue
+        candidate = source_root/'nero7_bringup/config'/filename if source_root else None
+        if candidate is not None and candidate.is_file():
+            params[name] = str(candidate)
+        else:
+            from ament_index_python.packages import get_package_share_directory
+            params[name] = str(Path(get_package_share_directory('nero7_bringup'))/'config'/filename)
+    return params
+
+
 def load_detection_params(path):
     params = dict(DETECTION_DEFAULTS, roi_px=[0, 0, 0, 0], block_height_min=.008,
                   block_height_max=.060, min_area_px=200, plane_ransac_distance=.006,
@@ -54,7 +76,7 @@ def load_detection_params(path):
     with open(path) as stream:
         params.update(yaml.safe_load(stream)['block_detector']['ros__parameters'])
     validate_detection_config(params)
-    return params
+    return resolve_detection_paths(params, path)
 
 
 def validate_detection_config(params):

@@ -138,3 +138,13 @@ def test_plane_height_cache_updates_after_transform_change():
     transform[2, 3] = .1
     changed = plane.height_image(depth, camera, transform)
     np.testing.assert_allclose(changed-first, .1, atol=1e-12)
+
+
+def test_source_configuration_resolves_shared_assets_without_a_machine_home():
+    from pathlib import Path
+    from nero7_perception.detection import load_detection_params
+    config = Path(__file__).resolve().parents[1]/'config/perception.yaml'
+    params = load_detection_params(config)
+    assert Path(params['belt_file']).is_file()
+    assert Path(params['calibration_file']).is_file()
+    assert '/home/ubuntu22/' not in params['belt_file']

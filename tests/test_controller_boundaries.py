@@ -116,3 +116,14 @@ def test_old_idle_status_does_not_complete_a_new_motion():
     assert not arm.is_motion_done()
     arm._status_cb(NS(motion_status=0))
     assert arm.is_motion_done()
+
+
+def test_startup_waits_for_first_feedback_without_latching_a_fault(controller):
+    controller.get_parameter.return_value.value = True
+    controller._continuous_motion_issued = False
+    controller._feedback_time = ClockValue(0.)
+    controller.get_clock = Mock(return_value=NS(now=lambda: ClockValue(1.)))
+    controller._tick()
+    assert not controller._watchdog_tripped
+    controller._fsm._enter.assert_not_called()
+    controller._arm.estop.assert_not_called()

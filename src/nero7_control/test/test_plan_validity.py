@@ -51,3 +51,11 @@ def test_network_and_detector_use_same_distorted_optical_rays(model, distortion)
     camera = CameraGeometry(K, 640, 480, 'optical', distortion, model)
     np.testing.assert_allclose(optical_rays(pixels, K, distortion, model),
                                camera.rays(pixels[:, 0], pixels[:, 1]), atol=1e-12)
+
+
+def test_minimum_tilt_alignment_does_not_add_twist_to_horizontal_reference():
+    from nero7_control.kinematics import yaw_orientations
+    yaw = 1.444185508449333
+    rotations = list(yaw_orientations([0., 0., 0.], [1., 0., 0.], yaw))
+    expected = Rotation.from_euler('z', yaw)
+    assert min((rotation.inv()*expected).magnitude() for rotation in rotations) < 1e-12

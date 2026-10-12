@@ -134,11 +134,8 @@ class GraspControllerNode(Node):
         # --- belt + fsm ---
         belt = {}
         if params['belt_file']:
-            try:
-                with open(params['belt_file']) as f:
-                    belt = yaml.safe_load(f) or {}
-            except OSError as e:
-                self.get_logger().warn(f'cannot read belt file: {e}')
+            with open(params['belt_file']) as f:
+                belt = yaml.safe_load(f) or {}
         self._belt = BeltModel.from_yaml(belt)
         with open(params['calibration_file']) as f:
             self._calibration = yaml.safe_load(f)
@@ -304,11 +301,17 @@ class GraspControllerNode(Node):
         # arm feedback watchdog
         now = self.get_clock().now()
         if (now - self._feedback_time).nanoseconds * 1e-9 > self._p['feedback_timeout']:
+            if not self._continuous_motion_issued:
+                self.get_logger().warning('Waiting for fresh arm feedback', throttle_duration_sec=2.)
+                return
             if not self._watchdog_tripped:
                 self._stop_continuous('ARM FEEDBACK TIMEOUT - stop requested')
             return
 
         if (now-self._arm_status_time).nanoseconds*1e-9 > self._p['feedback_timeout']:
+            if not self._continuous_motion_issued:
+                self.get_logger().warning('Waiting for fresh arm status', throttle_duration_sec=2.)
+                return
             self._stop_continuous('ARM STATUS TIMEOUT - stop requested')
             return
         if self._arm_status is None:
@@ -436,6 +439,7 @@ class GraspControllerNode(Node):
     def _execute(self, cmd):
         kind = cmd['type']
         if kind == 'log':
+            self.get_logger().info(cmd.get('msg', ''))
             return
         if kind == 'estop':
             self._stop_continuous('Continuous grasp halted')

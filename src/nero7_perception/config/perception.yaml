@@ -87,8 +87,8 @@ block_detector:
     camera_optical_frame: "camera_color_optical_frame"
     
     # 外部标定与传送带参数文件位置 (可选)
-    belt_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml"
-    calibration_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml"
+    belt_file: ""  # 自动从源码相邻包或已安装 nero7_bringup 查找
+    calibration_file: ""
 
     # ---------------- 多目标追踪器 (BlockTracker) 参数 ----------------
     tracker_max_vel: 0.15          # 最大容许预测速度 (m/s)
