@@ -1,0 +1,32 @@
+# ROS 2 / colcon build output
+/build/
+/install/
+/log/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+.coverage
+htmlcov/
+
+# Local credentials and agent configuration
+/.aws/
+/.codex/
+/.agents/
+.env
+.env.*
+!.env.example
+
+# Editor and operating-system files
+/.vscode/
+.idea/
+.DS_Store
+*~
+
+# Generated ROS transform diagrams
+/frames_*.gv
+/frames_*.pdf
