@@ -342,3 +342,15 @@ def test_nonfinite_network_result_cannot_be_selected(actor, field):
     result[field] = float('nan')
     with pytest.raises(ValueError, match='Nonfinite'):
         actor._candidate(result, actor.track, 100.)
+
+
+@pytest.mark.parametrize('state', ['CONVEYOR_WAIT_GATE', 'CONVEYOR_WAIT_TARGET',
+                                  'CONVEYOR_START_ENABLE', 'CONVEYOR_DESCEND'])
+def test_disabling_after_any_accepted_motion_requests_stop(actor, state):
+    actor.state, actor.motion_issued = state, True
+    actor.node.get_parameter.return_value.value = False
+    actor.tick()
+    assert actor.state == 'CONVEYOR_ABORT'
+    actor.arm.estop.assert_called_once()
+    actor.arm.move_l.assert_not_called()
+    actor.arm.move_gripper.assert_not_called()

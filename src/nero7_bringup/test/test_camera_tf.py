@@ -49,3 +49,26 @@ def test_invalid_driver_quaternion_is_rejected():
     data['camera_link_to_color_optical']['quaternion'] = [0., 0., 0., 0.]
     with pytest.raises(ValueError):
         calibrated_camera_root_transform(data)
+
+
+def test_launch_loader_rejects_missing_or_incomplete_calibration(tmp_path):
+    from nero7_bringup.launch_common import load_calibration
+    with pytest.raises(OSError):
+        load_calibration(tmp_path/'missing.yaml')
+    path = tmp_path/'calibration.yaml'
+    path.write_text('camera_in_base: {}')
+    with pytest.raises((ValueError, KeyError)):
+        load_calibration(path)
+
+
+def test_launch_loader_uses_same_strict_transform_as_preview(tmp_path):
+    import yaml
+    from nero7_bringup.launch_common import load_calibration
+    data = calibration()
+    path = tmp_path/'calibration.yaml'
+    path.write_text(yaml.safe_dump(data))
+    args = load_calibration(path)
+    actual = np.eye(4)
+    actual[:3, 3] = args[:3]
+    actual[:3, :3] = Rotation.from_quat(args[3:]).as_matrix()
+    np.testing.assert_allclose(actual, calibrated_camera_root_transform(data), atol=1e-12)

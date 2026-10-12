@@ -23,7 +23,7 @@ class ConveyorOnce(StaticOnce):
         'CONVEYOR_CALIB_ENABLE', 'CONVEYOR_CALIB_OPEN', 'CONVEYOR_CALIB_APPROACH',
         'CONVEYOR_CALIB_DESCEND', 'CONVEYOR_CALIB_CLOSE', 'CONVEYOR_CALIB_REOPEN',
         'CONVEYOR_CALIB_RAISE', 'CONVEYOR_APPROACH', 'CONVEYOR_DESCEND',
-        'CONVEYOR_START_ENABLE', 'CONVEYOR_START_OPEN',
+        'CONVEYOR_START_ENABLE', 'CONVEYOR_START_OPEN', 'CONVEYOR_WAIT_GATE',
         'CONVEYOR_CLOSE', 'CONVEYOR_LIFT', 'CONVEYOR_HOLD', 'CONVEYOR_RETURN',
         'CONVEYOR_RELEASE', 'CONVEYOR_RETRACT', 'CONVEYOR_RECOVER_OPEN', 'CONVEYOR_RECOVER_RAISE',
     }
@@ -462,7 +462,7 @@ class ConveyorOnce(StaticOnce):
             return
         try:
             enabled = self._execution_enabled()
-            if not enabled and self.state in self.ACTIVE_STATES:
+            if not enabled and self.motion_issued:
                 raise ValueError('Execution disabled during active motion')
             if not self._fresh():
                 if self.motion_issued:

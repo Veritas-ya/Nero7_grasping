@@ -47,7 +47,8 @@ def generate_launch_description():
         Node(
             package='nero7_perception', executable='block_detector',
             name='block_detector', output='screen',
-            parameters=[{'params_file': perception_params}]),
+            parameters=[{'params_file': perception_params,
+                         'calibration_file': LaunchConfiguration('calibration_file')}]),
 
         Node(
             package='nero7_control', executable='grasp_controller',
