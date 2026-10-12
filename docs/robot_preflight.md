@@ -103,6 +103,8 @@ ros2 param set /grasp_controller execution_enabled false
 
 conveyor 连续模式还要求有效的 7 元素 bin_pre_joints 和 6 元素 bin_drop_pose。
 默认这两个配置为空，因此会拒绝执行；不应直接把一次静态验证当作连续抓取验证。
+连续模式复位仅允许 HALT 且最新反馈确认停止、故障已清除；单次模式 ABORT 后须退出重启。
+缺少 home/enable 服务会直接报错，不再阻塞控制循环等待。
 
 ## 验证范围
 

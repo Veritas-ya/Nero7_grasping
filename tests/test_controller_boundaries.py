@@ -127,3 +127,48 @@ def test_startup_waits_for_first_feedback_without_latching_a_fault(controller):
     assert not controller._watchdog_tripped
     controller._fsm._enter.assert_not_called()
     controller._arm.estop.assert_not_called()
+
+
+def test_missing_home_service_cannot_block_the_control_executor():
+    cls = production_class('src/nero7_control/nero7_control/arm_client.py',
+                           'RosTopicArmClient', dict(ArmClient=object, Node=object, time=time))
+    arm = cls.__new__(cls)
+    arm._srv_home = Mock()
+    arm._srv_home.service_is_ready.return_value = False
+    with pytest.raises(RuntimeError, match='home service'):
+        arm.home()
+    arm._srv_home.wait_for_service.assert_not_called()
+    arm._srv_home.call_async.assert_not_called()
+
+
+def test_reset_cannot_interrupt_an_active_state(controller):
+    response = controller._reset_cb(NS(data=True), NS(success=False, message=''))
+    assert not response.success and controller._fsm.state == 'WAIT'
+    controller._arm.estop.assert_not_called()
+    controller._fsm._enter.assert_not_called()
+
+
+@pytest.mark.parametrize('moving,fault,stale', [(True, False, False), (False, True, False),
+                                            (False, False, True)])
+def test_halt_reset_requires_fresh_stopped_fault_free_feedback(controller, moving, fault, stale):
+    controller._fsm._enter('HALT')
+    controller._arm_status = NS(motion_status=int(moving), err_status=int(fault), arm_status=0)
+    controller._feedback_time = controller._arm_status_time = ClockValue(0. if stale else .99)
+    controller.get_clock = Mock(return_value=NS(now=lambda: ClockValue(1.)))
+    response = controller._reset_cb(NS(data=True), NS(success=False, message=''))
+    assert not response.success and controller._fsm.state == 'HALT'
+
+
+def test_successful_halt_reset_does_not_restart_motion_while_execution_is_disabled(controller):
+    controller._fsm._enter('HALT')
+    controller._watchdog_tripped = True
+    controller._arm_status = NS(motion_status=0, err_status=0, arm_status=0)
+    controller._feedback_time = controller._arm_status_time = ClockValue(.99)
+    controller.get_clock = Mock(return_value=NS(now=lambda: ClockValue(1.)))
+    response = controller._reset_cb(NS(data=True), NS(success=False, message=''))
+    assert response.success and controller._fsm.state == 'IDLE'
+    assert not controller._continuous_motion_issued and not controller._watchdog_tripped
+    controller._tick()
+    assert controller._fsm.state == 'IDLE'
+    controller._arm.estop.assert_not_called()
+    controller._arm.move_l.assert_not_called()

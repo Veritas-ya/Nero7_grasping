@@ -155,17 +155,17 @@ class RosTopicArmClient(ArmClient):
             time.sleep(0.02)
 
     def enable(self):
-        while not self._srv_enable.wait_for_service(timeout_sec=2.0):
-            self._node.get_logger().info('waiting for /enable_agx_arm ...')
+        if not self._srv_enable.service_is_ready():
+            raise RuntimeError('Arm enable service unavailable')
         req = SetBool.Request()
         req.data = True
-        self._srv_enable.call_async(req)
+        return self._srv_enable.call_async(req)
 
     def home(self):
-        while not self._srv_home.wait_for_service(timeout_sec=2.0):
-            self._node.get_logger().info('waiting for /move_home ...')
+        if not self._srv_home.service_is_ready():
+            raise RuntimeError('Arm home service unavailable')
         self._motion_commanded()
-        self._srv_home.call_async(Empty.Request())
+        return self._srv_home.call_async(Empty.Request())
 
     def estop(self):
         # A fault/shutdown handler must never wait indefinitely for a dead driver.

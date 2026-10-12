@@ -266,11 +266,31 @@ class GraspControllerNode(Node):
         self._arm_status_time = self.get_clock().now()
 
     def _reset_cb(self, req, resp):
-        if req.data:
-            self._fsm.reset_halt()
-            self._watchdog_tripped = False
-            self.get_logger().info('FSM reset from HALT')
+        resp.success = False
+        if not req.data:
+            resp.message = 'Reset requires data=true'
+            return resp
+        if self._static_once is not None:
+            resp.message = 'Single-cycle modes must be restarted after completion or abort'
+            return resp
+        if self._fsm.state != HALT:
+            resp.message = 'Reset is only allowed from HALT'
+            return resp
+        now = self.get_clock().now()
+        status = self._arm_status
+        fresh = (0 <= (now-self._feedback_time).nanoseconds*1e-9 <= self._p['feedback_timeout']
+                 and 0 <= (now-self._arm_status_time).nanoseconds*1e-9 <= self._p['feedback_timeout'])
+        if (not fresh or status is None or status.motion_status != 0 or status.err_status
+                or status.arm_status in (1, 5, 7, 9, 10)):
+            resp.message = 'Fresh stopped, fault-free arm feedback is required'
+            return resp
+        self._fsm.reset_halt()
+        self._watchdog_tripped = False
+        self._continuous_motion_issued = False
+        self._last_cmd_pose = None
+        self.get_logger().info('FSM reset from HALT')
         resp.success = True
+        resp.message = 'HALT reset; execution_enabled still controls motion'
         return resp
 
     def _publish_state(self):
