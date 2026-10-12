@@ -44,7 +44,7 @@ class KalmanMotion:
     def __init__(self, xy, stamp, measurement_std=0.002,
                  accel_noise_std=0.002, initial_velocity_std=0.10,
                  innovation_gate=9.210340371976184,
-                 min_samples=8, min_span=0.3, window_s=0.6,
+                 min_samples=8, min_span=0.3, window_s=1.2,
                  max_velocity_std=0.010, observation_max_age=0.15,
                  qualification_gap=0.3, max_velocity=0.15,
                  belt_direction=None, cross_accel_noise_std=0.0005):
@@ -169,4 +169,20 @@ class KalmanMotion:
             return False
         variance = float(np.linalg.eigvalsh(self.covariance[2:, 2:])[-1])
         return bool(variance <= self.max_velocity_std ** 2
-                    and np.linalg.norm(self.state[2:]) <= self.max_velocity)
+                    and np.linalg.norm(self.state[2:]) <= self.max_velocity)    @property
+    def qualification_reason(self):
+        if len(self.accepted_stamps) < self.min_samples:
+            return 'insufficient_observations'
+        if self.accepted_stamps[-1]-self.accepted_stamps[0] < self.min_span:
+            return 'insufficient_time_span'
+        if self.state_stamp-self.observation_stamp > self.observation_max_age:
+            return 'observation_stale'
+        if np.linalg.eigvalsh(self.covariance[2:, 2:])[-1] > self.max_velocity_std**2:
+            return 'velocity_uncertain'
+        if np.linalg.norm(self.state[2:]) > self.max_velocity:
+            return 'velocity_out_of_range'
+        return 'qualified'
+
+    @property
+    def speed_valid(self):
+        return self.qualification_reason == 'qualified'

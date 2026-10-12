@@ -10,6 +10,9 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Opaq
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
+from launch.substitutions import PathJoinSubstitution
 
 from nero7_bringup.launch_common import camera_static_tf_opaque
 
@@ -22,12 +25,14 @@ def generate_launch_description():
     controller_params = LaunchConfiguration('controller_params')
 
     return LaunchDescription([
+        DeclareLaunchArgument('mode', default_value='conveyor'),
+        DeclareLaunchArgument('execution_enabled', default_value='false'),
         DeclareLaunchArgument('calibration_file',
                               default_value=os.path.join(pkg_dir, 'config', 'calibration.yaml')),
         DeclareLaunchArgument('perception_params',
-                              default_value=os.path.join(pkg_dir, 'config', 'perception.yaml')),
+                              default_value=PathJoinSubstitution([FindPackageShare('nero7_perception'), 'config', 'perception.yaml'])),
         DeclareLaunchArgument('controller_params',
-                              default_value=os.path.join(pkg_dir, 'config', 'controller.yaml')),
+                              default_value=PathJoinSubstitution([FindPackageShare('nero7_control'), 'config', 'controller.yaml'])),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -47,6 +52,9 @@ def generate_launch_description():
         Node(
             package='nero7_control', executable='grasp_controller',
             name='grasp_controller', output='screen',
-            parameters=[{'params_file': controller_params},
+            parameters=[{'params_file': controller_params,
+                         'mode': LaunchConfiguration('mode'),
+                         'calibration_file': LaunchConfiguration('calibration_file'),
+                         'execution_enabled': ParameterValue(LaunchConfiguration('execution_enabled'), value_type=bool)},
                         {'dry_run': 'true'}]),
     ])

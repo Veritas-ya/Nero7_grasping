@@ -90,6 +90,8 @@ class RosTopicArmClient(ArmClient):
         self._joint_state = None
         self._gripper_width = None
         self._motion_done = True
+        self._motion_pending = False
+        self._motion_started = False
         node.create_subscription(JointState, p + 'feedback/joint_states',
                                  self._joint_cb, 5)
         try:
@@ -108,7 +110,19 @@ class RosTopicArmClient(ArmClient):
         self._joint_state = list(msg.position)
 
     def _status_cb(self, msg):
-        self._motion_done = (msg.motion_status == 0)
+        if self._motion_pending:
+            if msg.motion_status != 0:
+                self._motion_started = True
+            elif self._motion_started:
+                self._motion_pending = False
+            self._motion_done = not self._motion_pending
+        else:
+            self._motion_done = (msg.motion_status == 0)
+
+    def _motion_commanded(self):
+        self._motion_pending = True
+        self._motion_started = False
+        self._motion_done = False
 
     def _gripper_cb(self, msg):
         self._gripper_width = msg.width
@@ -150,6 +164,7 @@ class RosTopicArmClient(ArmClient):
     def home(self):
         while not self._srv_home.wait_for_service(timeout_sec=2.0):
             self._node.get_logger().info('waiting for /move_home ...')
+        self._motion_commanded()
         self._srv_home.call_async(Empty.Request())
 
     def estop(self):
@@ -159,6 +174,7 @@ class RosTopicArmClient(ArmClient):
         self._node.get_logger().error('Emergency stop service unavailable')
 
     def move_p(self, pose, wait=False, timeout=5.0):
+        self._motion_commanded()
         self._pub_move_p.publish(self._pose_msg(pose))
         if wait:
             self._wait(timeout)
@@ -170,11 +186,13 @@ class RosTopicArmClient(ArmClient):
         msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = pose[:3]
         msg.pose.orientation.x, msg.pose.orientation.y = pose[3], pose[4]
         msg.pose.orientation.z, msg.pose.orientation.w = pose[5], pose[6]
+        self._motion_commanded()
         self._pub_move_p.publish(msg)
         if wait:
             self._wait(timeout)
 
     def move_l(self, pose, wait=False, timeout=5.0):
+        self._motion_commanded()
         self._pub_move_l.publish(self._pose_msg(pose))
         if wait:
             self._wait(timeout)
@@ -183,6 +201,7 @@ class RosTopicArmClient(ArmClient):
         msg = JointState()
         msg.name = [f'joint{i}' for i in range(1, len(joints) + 1)]
         msg.position = list(map(float, joints))
+        self._motion_commanded()
         self._pub_move_j.publish(msg)
         if wait:
             self._wait(timeout)

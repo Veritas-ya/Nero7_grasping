@@ -26,9 +26,12 @@ from nero7_msgs.msg import BlockTrackArray, GraspCandidate
 
 from .arm_client import RosTopicArmClient, SdkArmClient
 from .grasp_inference import GraspInference
-from .fsm import GraspFsm, RECOVER
+from .fsm import GraspFsm, HALT
+from ament_index_python.packages import get_package_share_directory
+from pathlib import Path
 from .belt import BeltModel
 from .visualization import SpeedImageViewer
+from agx_arm_msgs.msg import AgxArmStatus
 
 
 class TrackView:
@@ -72,6 +75,9 @@ class GraspControllerNode(Node):
         # Declare file values as defaults so explicit ROS overrides still win.
         for name, default in _DEFAULTS.items():
             value = file_params.get(name, default)
+            if name in ('calibration_file', 'belt_file') and not value:
+                filename = 'calibration.yaml' if name == 'calibration_file' else 'belt.yaml'
+                value = str(Path(get_package_share_directory('nero7_bringup'))/'config'/filename)
             if isinstance(default, dict):
                 values = dict(default, **value)
                 params[name] = {key: self.declare_parameter(
@@ -83,6 +89,7 @@ class GraspControllerNode(Node):
         self.declare_parameter('execution_enabled', False)
         self.declare_parameter('exit_on_complete', False)
         self._static_once = None
+        self._continuous_motion_issued = False
         # launch-level dry_run override (string from launch) beats the yaml
         dry_run = (self.get_parameter('dry_run').value if self.has_parameter('dry_run')
                    else self.declare_parameter('dry_run', '').value)
@@ -95,7 +102,7 @@ class GraspControllerNode(Node):
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
-        qos = QoSProfile(depth=5)
+        qos = QoSProfile(depth=1)
         if params['qos_reliability'] == 'best_effort':
             qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
@@ -107,12 +114,15 @@ class GraspControllerNode(Node):
         self._depth_stamp = None
         self._color_stamp = None
         self._K = None
+        self._color_frame = self._depth_frame = None
+        self._color_info = self._depth_info = None
         self.create_subscription(BlockTrackArray, params['tracks_topic'],
                                  self._tracks_cb, qos)
         self.create_subscription(Image, params['color_topic'], self._color_cb, qos)
         self.create_subscription(Image, params['depth_topic'], self._depth_cb, qos)
         self.create_subscription(CameraInfo, params['color_camera_info'],
                                  self._info_cb, qos)
+        self.create_subscription(CameraInfo, params['depth_camera_info'], self._depth_info_cb, qos)
 
         # --- outputs ---
         self._pub_state = self.create_publisher(String, '/grasp/state', 5)
@@ -130,6 +140,8 @@ class GraspControllerNode(Node):
             except OSError as e:
                 self.get_logger().warn(f'cannot read belt file: {e}')
         self._belt = BeltModel.from_yaml(belt)
+        with open(params['calibration_file']) as f:
+            self._calibration = yaml.safe_load(f)
         self._fsm = GraspFsm(self._belt, self._fsm_cfg(params))
 
         # --- arm ---
@@ -140,8 +152,12 @@ class GraspControllerNode(Node):
         else:
             self._arm = RosTopicArmClient(self, prefix=params['topic_prefix'])
         self._feedback_time = self.get_clock().now()
+        self._arm_status = None
+        self._arm_status_time = self._feedback_time
         self.create_subscription(JointState, params['topic_prefix'] + 'feedback/joint_states',
                                  self._feedback_cb, 5)
+        self.create_subscription(AgxArmStatus, params['topic_prefix']+'feedback/arm_status',
+                                 self._arm_status_cb, 5)
 
         # --- inference ---
         self._inference = None
@@ -190,6 +206,14 @@ class GraspControllerNode(Node):
             self._fsm.cfg['k_lead'] = float(v)
             self.get_logger().info(f'k_lead updated to {v}')
 
+    def _stop_continuous(self, reason):
+        self._watchdog_tripped = True
+        self._fsm._enter(HALT)
+        self.get_logger().error(reason)
+        if self._continuous_motion_issued:
+            return self._arm.estop()
+        return None
+
     # ---------------- config ----------------
 
     def _fsm_cfg(self, params):
@@ -201,6 +225,9 @@ class GraspControllerNode(Node):
                 'timeout_place', 'miss_halt_threshold', 'dry_run',
                 'bin_pre_joints', 'bin_drop_pose')
         cfg = {k: params[k] for k in keys if params.get(k) is not None}
+        cfg['gripper_tcp'] = self._calibration['gripper_tcp']
+        cfg['grasp_rpy'] = self._calibration['grasp_rpy']
+        cfg['closing_axis_flange'] = [0., 0., 1.]
         return cfg
 
     # ---------------- callbacks ----------------
@@ -212,20 +239,34 @@ class GraspControllerNode(Node):
     def _color_cb(self, msg):
         self._color = self._bridge.imgmsg_to_cv2(msg, 'rgb8')
         self._color_stamp = msg.header.stamp
+        self._color_frame = msg.header.frame_id
 
     def _depth_cb(self, msg):
+        if msg.encoding not in ('16UC1', '32FC1', '64FC1'):
+            self._depth = None
+            self.get_logger().warning('Unsupported depth encoding: '+msg.encoding, throttle_duration_sec=2.)
+            return
         img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         if msg.encoding in ('32FC1', '64FC1'):
             # Gazebo publishes metres; the network and backprojection expect mm.
             img = np.where(np.isfinite(img) & (img > 0), img*1000., 0.).astype(np.float32)
         self._depth = img
         self._depth_stamp = msg.header.stamp
+        self._depth_frame = msg.header.frame_id
 
     def _info_cb(self, msg):
         self._K = np.array(msg.k, float).reshape(3, 3)
+        self._color_info = msg
+
+    def _depth_info_cb(self, msg):
+        self._depth_info = msg
 
     def _feedback_cb(self, msg):
         self._feedback_time = self.get_clock().now()
+
+    def _arm_status_cb(self, msg):
+        self._arm_status = msg
+        self._arm_status_time = self.get_clock().now()
 
     def _reset_cb(self, req, resp):
         if req.data:
@@ -254,12 +295,26 @@ class GraspControllerNode(Node):
         if self._static_once is not None:
             self._static_once.tick()
             return
+        if not self.get_parameter('execution_enabled').value or self._p['dry_run']:
+            if self._continuous_motion_issued and not self._watchdog_tripped:
+                self._stop_continuous('Execution disabled during continuous grasp')
+            return
+        if self._watchdog_tripped or self._fsm.state == HALT:
+            return
         # arm feedback watchdog
         now = self.get_clock().now()
         if (now - self._feedback_time).nanoseconds * 1e-9 > self._p['feedback_timeout']:
             if not self._watchdog_tripped:
-                self._watchdog_tripped = True
-                self.get_logger().error('ARM FEEDBACK TIMEOUT - commands blocked')
+                self._stop_continuous('ARM FEEDBACK TIMEOUT - stop requested')
+            return
+
+        if (now-self._arm_status_time).nanoseconds*1e-9 > self._p['feedback_timeout']:
+            self._stop_continuous('ARM STATUS TIMEOUT - stop requested')
+            return
+        if self._arm_status is None:
+            return
+        if self._arm_status.err_status or self._arm_status.arm_status in (1, 5, 7, 9, 10):
+            self._stop_continuous('Driver fault - stop requested')
             return
 
         # request inference for the tracked target (rate-limited, latest-only)
@@ -282,7 +337,11 @@ class GraspControllerNode(Node):
             gripper_width=self._arm.get_gripper_width(),
             joint_state=self._arm.get_joint_state(),
         )
-        cmds = self._fsm.tick(inp)
+        try:
+            cmds = self._fsm.tick(inp)
+        except Exception as error:
+            self._stop_continuous('Continuous grasp failed: '+str(error))
+            return
         if (self._fsm.last_delta_s is not None and
                 self._fsm.last_delta_s != self._last_pub_delta):
             self._last_pub_delta = self._fsm.last_delta_s
@@ -292,7 +351,12 @@ class GraspControllerNode(Node):
             self.get_logger().info(f'delta_s at grasp: '
                                    f'{self._fsm.last_delta_s * 1000:.1f} mm')
         for c in cmds:
-            self._execute(c)
+            try:
+                self._execute(c)
+            except Exception as error:
+                self._stop_continuous('Command rejected: '+str(error))
+            if self._watchdog_tripped:
+                break
 
     def _maybe_request_inference(self, now):
         if self._inference is None or self._K is None:
@@ -303,12 +367,17 @@ class GraspControllerNode(Node):
         if self._depth_stamp is None:
             return
         depth_stamp = self._depth_stamp.sec+self._depth_stamp.nanosec*1e-9
-        if abs(image_stamp-depth_stamp) > .05 or now.nanoseconds*1e-9-image_stamp > .2:
+        capture_time = now.nanoseconds*1e-9
+        if (abs(image_stamp-depth_stamp) > .02
+                or not 0 <= capture_time-image_stamp <= .2
+                or not 0 <= capture_time-depth_stamp <= .2):
+            return
+        if not self._registered_images_valid():
             return
         if self._fsm.state not in ('TRACK', 'APPROACH', 'WAIT'):
             return
         tr = next((t for t in self._tracks if t.id == self._fsm.target_id), None)
-        if tr is None or now.nanoseconds * 1e-9 - tr.stamp > 0.2:
+        if tr is None or not 0 <= capture_time-tr.stamp <= .2:
             return
         # TF camera_optical -> base at the image stamp
         try:
@@ -325,7 +394,30 @@ class GraspControllerNode(Node):
                       tf.transform.translation.z])
         self._inference.request(
             self._color, self._depth, tr.u_px, tr.v_px, self._K,
-            image_stamp, {'R': R, 't': t}, belt_z=tr.belt_z, target_id=tr.id)
+            image_stamp, {'R': R, 't': t}, belt_z=tr.belt_z, target_id=tr.id,
+            distortion=self._color_info.d, distortion_model=self._color_info.distortion_model)
+
+    def _registered_images_valid(self):
+        color, depth = self._color_info, self._depth_info
+        if color is None or depth is None:
+            return False
+        try:
+            return (color.header.frame_id == depth.header.frame_id == self._color_frame
+                    == self._depth_frame == self._p['camera_optical_frame']
+                    and (color.width, color.height) == (depth.width, depth.height)
+                    == (self._color.shape[1], self._color.shape[0])
+                    == (self._depth.shape[1], self._depth.shape[0])
+                    and np.allclose(color.k, depth.k, atol=1e-4, rtol=0)
+                    and len(color.d) == len(depth.d)
+                    and np.allclose(color.d, depth.d, atol=1e-6, rtol=0)
+                    and color.distortion_model == depth.distortion_model
+                    and color.binning_x in (0, 1) and color.binning_y in (0, 1)
+                    and depth.binning_x in (0, 1) and depth.binning_y in (0, 1)
+                    and not any((color.roi.x_offset, color.roi.y_offset, color.roi.width, color.roi.height,
+                                 depth.roi.x_offset, depth.roi.y_offset, depth.roi.width, depth.roi.height))
+                    and np.isfinite(self._K).all() and self._K[0, 0] > 0 and self._K[1, 1] > 0)
+        except (TypeError, ValueError):
+            return False
 
     def _publish_candidate(self, res):
         msg = GraspCandidate()
@@ -345,14 +437,18 @@ class GraspControllerNode(Node):
         kind = cmd['type']
         if kind == 'log':
             return
-        if self._watchdog_tripped and kind != 'gripper':
+        if kind == 'estop':
+            self._stop_continuous('Continuous grasp halted')
+            return
+        if self._watchdog_tripped:
             self.get_logger().warn(f'blocked {kind}: watchdog tripped')
             return
+        self._continuous_motion_issued = True
         if kind in ('move_p', 'move_l'):
             pose = cmd['pose']
             if not self._pose_ok(pose, kind):
                 self.get_logger().error(f'rejected unsafe {kind}: {pose}')
-                self._fsm._enter(RECOVER)
+                self._stop_continuous('Pose outside configured workspace or step limit')
                 return
             self._last_cmd_pose = pose
             self._arm.move_p(pose) if kind == 'move_p' else self._arm.move_l(pose)
@@ -386,6 +482,8 @@ _DEFAULTS = {
     'color_topic': '/camera/color/image_raw',
     'depth_topic': '/camera/depth/image_raw',  # aligned when depth_registration:=true
     'color_camera_info': '/camera/color/camera_info',
+    'depth_camera_info': '/camera/depth/camera_info',
+    'calibration_file': '',
     'qos_reliability': 'best_effort',
     'visualization_enabled': True,
     'visualization_topic': '/perception/debug_image',
@@ -394,7 +492,7 @@ _DEFAULTS = {
     'model_path': '/home/ubuntu22/grasp/robotic-grasping/trained-models/jacquard-rgbd-grconvnet3-drop0-ch32',
     'infer_max_rate': 10.0, 'result_max_age': 0.2, 'q_threshold': 0.25,
     'inference_device': 'cuda',
-    'belt_file': '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml',
+    'belt_file': '',
     'approach_height': 0.08, 'descend_offset': 0.04, 'lift_height': 0.12,
     't_approach': 1.5, 'tau_desc': 0.5, 'k_lead': 0.05,
     'gate_tol': 0.02, 'abort_tol': 0.025,
@@ -447,6 +545,10 @@ def main(args=None):
                 node._timer.cancel()
                 if node._static_once is not None:
                     node._static_once.shutdown()
+                elif node._continuous_motion_issued:
+                    future = node._stop_continuous('Controller shutting down')
+                    if future is not None and node.context.ok():
+                        rclpy.spin_until_future_complete(node, future, timeout_sec=.5)
                 if node._inference is not None:
                     node._inference.shutdown()
                 node.destroy_node()

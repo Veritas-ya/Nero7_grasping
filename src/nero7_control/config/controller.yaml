@@ -11,6 +11,7 @@ grasp_controller:
     # depth_registration:=true 时对齐深度（1280x720 彩色网格）在此话题
     depth_topic: /camera/depth/image_raw
     color_camera_info: /camera/color/camera_info
+    depth_camera_info: /camera/depth/camera_info
     qos_reliability: best_effort
     base_frame: base_link
     camera_optical_frame: camera_color_optical_frame
@@ -26,7 +27,7 @@ grasp_controller:
     q_threshold: 0.25
 
     # --- belt ---
-    belt_file: /home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml
+    # belt_file defaults to the installed nero7_bringup/config/belt.yaml
 
     # --- fsm ---
     approach_height: 0.08

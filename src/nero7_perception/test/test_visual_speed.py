@@ -85,7 +85,7 @@ class VisualSpeedTest(unittest.TestCase):
             tracks = tracker.update([], i/30)
         self.assertFalse(tracks[0].speed_valid)
         self.assertIsNone(tracks[0].speed)
-        for i in range(25, 27):
+        for i in range(25, 36):
             tracks = tracker.update([], i/30)
         self.assertEqual(tracks, [])
 

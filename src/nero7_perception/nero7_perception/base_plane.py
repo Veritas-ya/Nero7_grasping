@@ -43,7 +43,12 @@ class BaseBeltPlane:
         # Algebraically identical to transforming every XYZ point, without an HxWx3 allocation.
         camera.check_grid(depth, camera.frame_id)
         transform = check_transform(transform)
-        coefficient = np.einsum('...i,i->...', camera.grid_rays(), transform[:3, :3].T @ self.normal)
+        key = (id(camera), transform.tobytes(), self.normal.tobytes())
+        if getattr(self, '_height_cache_key', None) != key:
+            self._height_coefficient = np.einsum('...i,i->...', camera.grid_rays(),
+                                                transform[:3, :3].T @ self.normal)
+            self._height_cache_key = key
+        coefficient = self._height_coefficient
         return (depth * coefficient + self.normal @ transform[:3, 3] + self.offset) / self.normal[2]
 
 

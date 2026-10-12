@@ -17,6 +17,9 @@ belt_z, centroid_x, centroid_y, u_px, v_px, stamp (float, same clock as now).
 """
 import math
 import time
+import numpy as np
+from scipy.spatial.transform import Rotation
+from .kinematics import yaw_orientations
 
 # states
 IDLE, TRACK, APPROACH, WAIT, DESCEND, GRASP, LIFT, PLACE, RECOVER, HALT = (
@@ -50,6 +53,9 @@ class GraspFsm:
             timeout_grasp=1.5, timeout_lift=3.0, timeout_place=10.0,
             miss_halt_threshold=3, dry_run=False,
             bin_pre_joints=None, bin_drop_pose=None,
+            gripper_tcp=[0., 0., 0.], grasp_rpy=None,
+            closing_axis_flange=[0., 0., 1.],
+            observation_max_age=.2, grasp_max_age=.3, grasp_belt_clearance=.012,
         )
         c.update(cfg)
         self.cfg = c
@@ -66,6 +72,9 @@ class GraspFsm:
         self._step = 0
         self._last_move = None     # (type, target) of last emitted move cmd
         self._log = []
+        self._step_started = self._state_t0
+        self._width_previous = None
+        self._width_settled = None
 
     # ---------------- helpers ----------------
 
@@ -74,6 +83,8 @@ class GraspFsm:
         self._state_t0 = time.monotonic()
         self._step = 0
         self._last_move = None
+        self._step_started = self._state_t0
+        self._width_previous = self._width_settled = None
 
     def _elapsed(self):
         return time.monotonic() - self._state_t0
@@ -84,11 +95,32 @@ class GraspFsm:
                 return t
         return None
 
+    def _track_valid(self, tr, inp):
+        return (tr is not None and tr.status == 1 and tr.speed_ok
+                and math.isfinite(tr.speed)
+                and self.cfg['speed_min'] <= tr.speed <= self.cfg['speed_max']
+                and math.isfinite(tr.stamp)
+                and 0 <= inp['now']-tr.stamp <= self.cfg['observation_max_age'])
+
+    def placement_valid(self):
+        for name, length in [('bin_pre_joints', 7), ('bin_drop_pose', 6)]:
+            value = self.cfg[name]
+            if value is None or len(value) != length or not np.isfinite(value).all():
+                return False
+        return True
+
+    def _fail(self, cmds, reason):
+        cmds.extend([{'type': 'log', 'msg': reason}, {'type': 'estop'}])
+        self.misses += 1
+        self._enter(HALT)
+
     def _best_track(self, inp):
         """Closest-to-gate confirmed track with valid speed."""
         best, best_s = None, -1e9
         for t in inp['tracks']:
-            if not (t.status == 1 and t.speed_ok and t.speed > 0):
+            if not self._track_valid(t, inp) or t.s > self.belt.gate_s:
+                continue
+            if t.speed <= 0:
                 continue
             if t.speed < self.cfg['speed_min'] or t.speed > self.cfg['speed_max']:
                 continue
@@ -98,7 +130,7 @@ class GraspFsm:
 
     def _pred_s(self, tr, inp):
         """Predicted scalar belt position right now."""
-        return tr.s + tr.speed * max(inp['now'] - tr.stamp, 0.0)
+        return tr.s + tr.speed * max(inp['now'] - getattr(tr, 'motion_stamp', tr.stamp), 0.0)
 
     def _live_grasp(self):
         """Grasp result to plan with: frozen during DESCEND..LIFT, live else."""
@@ -119,26 +151,37 @@ class GraspFsm:
         return yaw
 
     def _pose(self, x, y, z, yaw):
-        return [x, y, z, self.cfg['grasp_roll'], self.cfg['grasp_pitch'], yaw]
+        # Driver poses refer to the flange; input points refer to the calibrated TCP.
+        if self.cfg['grasp_rpy'] is None:
+            rotation = Rotation.from_euler('xyz', [self.cfg['grasp_roll'], self.cfg['grasp_pitch'], yaw])
+        else:
+            rotation = next(yaw_orientations(self.cfg['grasp_rpy'],
+                                             self.cfg['closing_axis_flange'], yaw))
+        flange = np.array([x, y, z])-rotation.apply(self.cfg['gripper_tcp'])
+        return [*flange.tolist(), *rotation.as_euler('xyz').tolist()]
 
     def _gate_above_pose(self, tr):
-        gx, gy = self.belt.point_of(self.belt.gate_s)
-        z = tr.belt_z + tr.height + self.cfg['approach_height']
-        return self._pose(gx, gy, z, self._grasp_yaw())
+        pose = self._grasp_pose(tr)
+        pose[2] += self._descend_offset(tr)+self.cfg['approach_height']
+        return pose
 
     def _descend_offset(self, tr):
         return min(self.cfg['descend_offset'], max(tr.height - 0.005, 0.005))
 
     def _grasp_pose(self, tr):
-        """Grasp target pose at the gate."""
+        """Project the object-relative grasp point onto the fixed interception line."""
         g = self._live_grasp()
         if g is not None and g.get('status') == 0:
-            c = g['center']
-            z = c[2] - self._descend_offset(tr)
-            return self._pose(float(c[0]), float(c[1]), float(z), self._grasp_yaw())
-        # fallback: block centroid, top-down
-        z = tr.belt_z + tr.height - self._descend_offset(tr)
-        return self._pose(tr.centroid_x, tr.centroid_y, z, self._grasp_yaw())
+            center = np.asarray(g['center'], float).copy()
+        else:
+            center = np.array([tr.centroid_x, tr.centroid_y,
+                               getattr(tr, 'centroid_z', tr.belt_z+tr.height)])
+        if center.shape != (3,) or not np.isfinite(center).all():
+            raise ValueError('Invalid grasp point')
+        center[:2] += self.belt.d_hat*(self.belt.gate_s-self.belt.s_of(center[:2]))
+        center[2] = max(center[2]-self._descend_offset(tr),
+                        tr.belt_z+self.cfg['grasp_belt_clearance'])
+        return self._pose(*center, self._grasp_yaw())
 
     def _gripper_target(self):
         g = self._live_grasp()
@@ -163,13 +206,29 @@ class GraspFsm:
         Returns list of command dicts."""
         cmds = []
         live = inp.get('grasp')
-        if live is not None:
-            self.grasp = live
+        self.grasp = (live if live is not None and live.get('status') == 0
+                      and live.get('target_id') == self.target_id
+                      and math.isfinite(live.get('stamp', float('nan')))
+                      and 0 <= inp['now']-live['stamp'] <= self.cfg['grasp_max_age']
+                      else None)
         tr = self._find_track(inp, self.target_id) if self.target_id is not None else None
+
+        if self.state in (TRACK, APPROACH, WAIT, DESCEND) and not self._track_valid(tr, inp):
+            self.grasp = None
+            if self.state == TRACK:
+                self.target_id = None
+                self._enter(IDLE)
+            else:
+                self._fail(cmds, 'Target lost, stale or velocity invalid')
+            return cmds
 
         if self.state == IDLE:
             best = self._best_track(inp)
+            if best is not None and not self.placement_valid():
+                self._fail(cmds, 'Teach valid bin_pre_joints and bin_drop_pose before conveyor picking')
+                return cmds
             if best is not None:
+                self._last_yaw = None
                 self.target_id = best.id
                 self.grasp_used = None
                 self.grasp = None
@@ -193,10 +252,12 @@ class GraspFsm:
             elif self._elapsed() > self.cfg['timeout_approach']:
                 cmds.append({'type': 'log', 'msg': 'APPROACH timeout'})
                 self._enter(RECOVER)
+            elif self._step == 0:
+                cmds.append({'type': 'gripper', 'width': .070, 'force': self.cfg['gripper_force']})
+                self._move(cmds, 'move_p', self._gate_above_pose(tr))
+                self._step = 1
             elif inp['arm_done'] and self._elapsed() > 0.1:
                 self._enter(WAIT)
-            else:
-                self._move(cmds, 'move_p', self._gate_above_pose(tr))
 
         elif self.state == WAIT:
             if tr is None:
@@ -207,9 +268,8 @@ class GraspFsm:
                 self._enter(RECOVER)
             elif self._pred_s(tr, inp) > self.belt.gate_s + self.cfg['gate_tol']:
                 cmds.append({'type': 'log', 'msg': 'block passed gate'})
-                self.misses += 1
                 self._enter(RECOVER)
-            elif self._descend_trigger(tr, inp):
+            elif self.grasp is not None and self._descend_trigger(tr, inp):
                 self.grasp_used = self.grasp
                 self.last_grasp_pose = self._grasp_pose(tr)
                 cmds.append({'type': 'log',
@@ -217,12 +277,12 @@ class GraspFsm:
                                     f'v={tr.speed:.3f}'})
                 self._enter(DESCEND)
             else:
-                # keep aiming at the gate; re-aim when the yaw refines
-                self._move(cmds, 'move_p', self._gate_above_pose(tr))
+                pass  # Hold the completed approach; do not restart it for image jitter.
 
         elif self.state == DESCEND:
             if tr is not None and self._elapsed() > 0.1:
-                ds = abs(self._pred_s(tr, inp) - self.belt.gate_s)
+                remaining = max(self.cfg['tau_desc']-self._elapsed(), 0.)
+                ds = abs(self._pred_s(tr, inp)+tr.speed*remaining-self.belt.gate_s)
                 if ds > self.cfg['abort_tol']:
                     cmds.append({'type': 'log',
                                  'msg': f'DESCEND abort ds={ds:.3f}'})
@@ -242,25 +302,24 @@ class GraspFsm:
         elif self.state == GRASP:
             target = self._gripper_target()
             if self.cfg['dry_run']:
-                self._enter(LIFT)  # never close in dry run
-            elif self._elapsed() < 0.1:
+                self._enter(LIFT)
+            elif self._step == 0:
                 cmds.append({'type': 'gripper', 'width': target,
                              'force': self.cfg['gripper_force']})
+                self._step = 1
             else:
-                w = inp.get('gripper_width')
-                if w is not None and w < 0.070:  # feedback valid and closed-ish
-                    if w > target * 1.1:         # stopped on the block
+                width = inp.get('gripper_width')
+                if width is not None and math.isfinite(width):
+                    if self._width_previous is None or abs(width-self._width_previous) > .001:
+                        self._width_settled = time.monotonic()
+                    self._width_previous = width
+                    settled = time.monotonic()-self._width_settled > .3
+                    if self._elapsed() > .5 and settled and target+.003 < width < .067:
                         cmds.append({'type': 'log', 'msg': 'grasped'})
                         self._enter(LIFT)
-                    else:                        # closed on air
-                        cmds.append({'type': 'log', 'msg': 'empty grasp'})
-                        self._enter(RECOVER)
-                elif self._elapsed() > self.cfg['timeout_grasp']:
-                    cmds.append({'type': 'log', 'msg': 'GRASP timeout'})
+                if self.state == GRASP and self._elapsed() > self.cfg['timeout_grasp']:
+                    cmds.append({'type': 'log', 'msg': 'Empty or unverified grasp'})
                     self._enter(RECOVER)
-                else:
-                    cmds.append({'type': 'gripper', 'width': target,
-                                 'force': self.cfg['gripper_force']})
 
         elif self.state == LIFT:
             if inp['arm_done'] and self._elapsed() > 0.3:
@@ -291,7 +350,7 @@ class GraspFsm:
     # ---------------- sequences ----------------
 
     def _descend_trigger(self, tr, inp):
-        age = inp['now'] - tr.stamp
+        age = inp['now'] - getattr(tr, 'motion_stamp', tr.stamp)
         tau = self.cfg['tau_desc']
         lead = self.cfg['k_lead']
         # block (extrapolated past vision delay) + descend travel vs gate
@@ -326,42 +385,35 @@ class GraspFsm:
 
     def _place_sequence(self, inp):
         cmds = []
-        step = self._step
-        self._step += 1
+        if not self.placement_valid():
+            self._fail(cmds, 'Missing or invalid taught placement')
+            return cmds
+        if self._elapsed() > self.cfg['timeout_place']:
+            self._fail(cmds, 'PLACE timeout')
+            return cmds
         js, drop = self.cfg['bin_pre_joints'], self.cfg['bin_drop_pose']
-        if step == 0:
-            if js is None:
-                self._step = 2
-            else:
-                cmds.append({'type': 'move_j', 'joints': js})
-        elif step == 1:
-            if inp['arm_done']:
-                self._step = 2
-            else:
-                cmds.append({'type': 'move_j', 'joints': js})
-        elif step == 2:
-            if drop is None:
-                self._step = 4
-            else:
-                cmds.append({'type': 'move_l', 'pose': drop})
-        elif step == 3:
-            if inp['arm_done']:
-                self._step = 4
-            else:
-                cmds.append({'type': 'move_l', 'pose': drop})
-        elif step == 4:
-            cmds.append({'type': 'gripper', 'width': 0.070,
-                         'force': self.cfg['gripper_force']})
-            cmds.append({'type': 'log', 'msg': 'released'})
-            self.successes += 1
-            self.target_id = None
-            self.grasp_used = None
-            self.grasp = None
-            self._enter(IDLE)
+        age = time.monotonic()-self._step_started
+        if self._step == 0:
+            self._move(cmds, 'move_j', js)
+            self._step, self._step_started = 1, time.monotonic()
+        elif self._step == 1 and inp['arm_done'] and age > .1:
+            self._move(cmds, 'move_l', drop)
+            self._step, self._step_started = 2, time.monotonic()
+        elif self._step == 2 and inp['arm_done'] and age > .1:
+            cmds.append({'type': 'gripper', 'width': .070, 'force': self.cfg['gripper_force']})
+            self._step, self._step_started = 3, time.monotonic()
+        elif self._step == 3:
+            width = inp.get('gripper_width')
+            if age > .3 and width is not None and math.isfinite(width) and width >= .067:
+                self.successes += 1
+                self.misses = 0
+                self.target_id = self.grasp_used = self.grasp = None
+                self._enter(IDLE)
         return cmds
 
     def reset_halt(self):
         """Manual reset after HALT."""
         self.misses = 0
         self.target_id = None
+        self.grasp = self.grasp_used = None
         self._enter(IDLE)

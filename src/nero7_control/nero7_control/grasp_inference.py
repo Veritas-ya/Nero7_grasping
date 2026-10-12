@@ -18,6 +18,7 @@ import torch
 
 from .grconvnet.post_process import post_process_output
 from .grconvnet.grasp import detect_grasps
+from .inference_geometry import optical_rays
 
 CROP = 224
 # trained with RGB: img/255 - mean; depth: img/255 - mean (see CameraData)
@@ -58,7 +59,7 @@ class GraspInference:
 
     # ---------------- public API ----------------
 
-    def request(self, rgb, depth_mm, u, v, K, stamp_sec, t_base_cam, belt_z=None, target_id=None):
+    def request(self, rgb, depth_mm, u, v, K, stamp_sec, t_base_cam, belt_z=None, target_id=None, distortion=(), distortion_model='plumb_bob'):
         """Submit an inference request for the block at pixel (u, v).
 
         Full images in, crop is made by the worker.  Older pending requests
@@ -70,6 +71,7 @@ class GraspInference:
                                  stamp=stamp_sec, tf=t_base_cam,
                                  belt_z=belt_z,
                                  target_id=target_id,
+                                 distortion=tuple(distortion), distortion_model=distortion_model,
                                  seq=self._request_seq)
             self._cond.notify()
 
@@ -141,8 +143,9 @@ class GraspInference:
             us, vs = uu+crop_u0, vv+crop_v0
             dm = crop_d.astype(float)/1000
             K = req['K']
-            cam = np.stack([(us-K[0, 2])*dm/K[0, 0],
-                            (vs-K[1, 2])*dm/K[1, 1], dm], axis=-1)
+            rays = optical_rays(np.column_stack([us.ravel(), vs.ravel()]), K,
+                                req.get('distortion', ()), req.get('distortion_model', 'plumb_bob'))
+            cam = rays.reshape(CROP, CROP, 3)*dm[..., None]
             tf = req['tf']
             bz = (cam @ tf['R'].T + tf['t'])[..., 2]
             mask = (np.isfinite(dm) & (dm > 0)
@@ -177,11 +180,13 @@ class GraspInference:
                 return dict(status=1, stamp=req['stamp'])
 
         # backproject center + direction vector to 3D in camera frame
-        p0 = _backproject(u, v, z, K)
+        distortion = req.get('distortion', ())
+        model = req.get('distortion_model', 'plumb_bob')
+        p0 = _backproject(u, v, z, K, distortion, model)
         ang = g.angle
         # Grasp.angle is anticlockwise: image rows increase downwards.
         u1, v1 = u + 12.0 * np.cos(ang), v - 12.0 * np.sin(ang)
-        p1 = _backproject(u1, v1, z, K)
+        p1 = _backproject(u1, v1, z, K, distortion, model)
         t = req['tf']
         R, tvec = t['R'], t['t']
         p0b = R @ p0 + tvec
@@ -192,7 +197,7 @@ class GraspInference:
         yaw = (yaw + np.pi / 2) % np.pi - np.pi / 2
 
         # width: crop pixels -> mm at block depth, with grasp factor
-        width_mm = float(g.length) * (z * 1000.0) / K[0, 0]
+        width_mm = float(g.length)*np.linalg.norm(p1-p0)/12.*1000.
         raw_width_mm = width_mm
         width_mm = float(np.clip(width_mm * 0.85, 15.0, 60.0))
 
@@ -253,7 +258,5 @@ def make_crop(rgb, depth, u, v, size=CROP):
     return rc, dc, u0, v0
 
 
-def _backproject(u, v, z, K):
-    return np.array([(u - K[0, 2]) * z / K[0, 0],
-                     (v - K[1, 2]) * z / K[1, 1],
-                     z], float)
+def _backproject(u, v, z, K, distortion=(), distortion_model='plumb_bob'):
+    return optical_rays([[u, v]], K, distortion, distortion_model)[0]*z

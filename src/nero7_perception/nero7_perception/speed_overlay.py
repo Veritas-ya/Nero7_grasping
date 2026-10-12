@@ -18,12 +18,12 @@ def speed_label(track):
     return prefix + f'{np.linalg.norm(velocity):.3f} m/s'
 
 
-def draw_speed_overlay(image, tracks):
+def draw_speed_overlay(image, tracks, pixel_scale=1.):
     """Keep each label next to its own centroid and inside the image bounds."""
     result = image.copy()
     height, width = result.shape[:2]
     for track in tracks:
-        u, v = int(round(track.u_px)), int(round(track.v_px))
+        u, v = int(round(track.u_px*pixel_scale)), int(round(track.v_px*pixel_scale))
         color = ((0, 255, 0) if track.status == STATUS_CONFIRMED else
                  (0, 0, 255) if track.status == STATUS_LOST else (0, 200, 255))
         cv2.circle(result, (u, v), 8, color, 2)
