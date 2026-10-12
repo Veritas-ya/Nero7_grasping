@@ -162,14 +162,6 @@ class KalmanMotion:
             self.accepted_stamps.popleft()
 
     @property
-    def speed_valid(self):
-        if (len(self.accepted_stamps) < self.min_samples
-                or self.accepted_stamps[-1] - self.accepted_stamps[0] < self.min_span
-                or self.state_stamp - self.observation_stamp > self.observation_max_age):
-            return False
-        variance = float(np.linalg.eigvalsh(self.covariance[2:, 2:])[-1])
-        return bool(variance <= self.max_velocity_std ** 2
-                    and np.linalg.norm(self.state[2:]) <= self.max_velocity)    @property
     def qualification_reason(self):
         if len(self.accepted_stamps) < self.min_samples:
             return 'insufficient_observations'

@@ -38,3 +38,5 @@ jobs:
           src/nero7_perception/test/test_visual_speed.py
           src/nero7_perception/test/test_depth_center.py
           src/nero7_perception/test/test_debug_overlay_regressions.py
+      - name: Compare synthetic plane-fitting performance
+        run: python scripts/benchmark_perception.py
