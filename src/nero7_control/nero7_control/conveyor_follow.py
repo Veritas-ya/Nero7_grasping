@@ -141,8 +141,13 @@ class ConveyorFollow(StaticOnce):
                 return
             rotation = Rotation.from_quat(quaternion)
             if self.velocity_feedback.add(stamp, point+rotation.apply(self.tcp)):
-                super()._pose_cb(msg)
-                self.last_pose_stamp = stamp
+                # Keep an independent accepted sample; a reused/rejected ROS
+                # message object must not mutate the controller's current pose.
+                accepted = Pose()
+                accepted.position.x, accepted.position.y, accepted.position.z = map(float, point)
+                (accepted.orientation.x, accepted.orientation.y,
+                 accepted.orientation.z, accepted.orientation.w) = map(float, quaternion)
+                self.pose, self.pose_time, self.last_pose_stamp = accepted, time.monotonic(), stamp
         except ValueError:
             return
 
