@@ -30,6 +30,8 @@ jobs:
           python -m pytest -q
           src/nero7_bringup/test/test_camera_tf.py
           tests/test_controller_boundaries.py
+          tests/test_follow_boundaries.py
+          src/nero7_control/test/test_follow_math.py
           src/nero7_control/test/test_fsm_regressions.py
           src/nero7_control/test/test_plan_validity.py
           src/nero7_control/test/test_conveyor_prediction.py
@@ -69,6 +71,7 @@ jobs:
           source install/setup.bash
           python3 -m pytest -q -p tests.ros_network_stub \
             tests/test_ros_startup.py \
+            tests/test_follow_ros.py \
             src/nero7_bringup/test/test_camera_tf.py \
             src/nero7_control/test/test_controller_shutdown.py \
             src/nero7_control/test/test_conveyor_scheduler.py \

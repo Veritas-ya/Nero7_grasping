@@ -47,6 +47,13 @@ class ArmClient:
     def move_gripper(self, width_m, force=1.0, wait=False, timeout=3.0):
         raise NotImplementedError
 
+    def can_stream_joints(self):
+        """True only for an available, exclusive continuous-position endpoint."""
+        return False
+
+    def stream_joints(self, joints):
+        raise RuntimeError('Continuous joint targets are unavailable on this backend')
+
     def get_joint_state(self):
         """Latest 7 arm joint angles (rad), or None."""
         raise NotImplementedError
@@ -82,6 +89,7 @@ class RosTopicArmClient(ArmClient):
         self._pub_move_p = node.create_publisher(PoseStamped, p + 'control/move_p', 1)
         self._pub_move_l = node.create_publisher(PoseStamped, p + 'control/move_l', 1)
         self._pub_move_j = node.create_publisher(JointState, p + 'control/move_j', 1)
+        self._pub_move_js = node.create_publisher(JointState, p + 'control/move_js', 1)
         self._pub_joint = node.create_publisher(JointState, p + 'control/joint_states', 1)
         self._srv_enable = node.create_client(SetBool, p + 'enable_agx_arm')
         self._srv_home = node.create_client(Empty, p + 'move_home')
@@ -214,6 +222,24 @@ class RosTopicArmClient(ArmClient):
         self._pub_joint.publish(msg)
         if wait:
             time.sleep(timeout if timeout < 1.0 else 1.0)
+
+    def can_stream_joints(self):
+        # An absent/ambiguous driver or another stream publisher blocks this mode.
+        return (self._pub_move_js.get_subscription_count() == 1
+                and self._node.count_publishers(self._pub_move_js.topic_name) == 1)
+
+    def stream_joints(self, joints):
+        joints = list(map(float, joints))
+        if len(joints) != 7 or not all(math.isfinite(q) for q in joints):
+            raise ValueError('Stream requires seven finite joint targets')
+        if not self.can_stream_joints():
+            raise RuntimeError('Exclusive /control/move_js endpoint unavailable')
+        msg = JointState()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.name = [f'joint{i}' for i in range(1, 8)]
+        msg.position = joints
+        # AGX move_js consumes positions; JointState.velocity is not a servo API.
+        self._pub_move_js.publish(msg)
 
     def _pose_msg(self, pose):
         msg = PoseStamped()

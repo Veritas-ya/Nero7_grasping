@@ -85,6 +85,7 @@ class GraspControllerNode(Node):
             else:
                 params[name] = self.declare_parameter(name, value).value
         self._p = params
+        self._mode_params = file_params
         self._mode = self.declare_parameter('mode', 'conveyor').value
         self.declare_parameter('execution_enabled', False)
         self.declare_parameter('exit_on_complete', False)
@@ -173,11 +174,14 @@ class GraspControllerNode(Node):
         if self._mode == 'conveyor_once':
             from .conveyor_once import ConveyorOnce
             self._static_once = ConveyorOnce(self)
+        elif self._mode == 'conveyor_follow':
+            from .conveyor_follow import ConveyorFollow
+            self._static_once = ConveyorFollow(self)
         elif self._mode == 'static_once':
             from .static_once import StaticOnce
             self._static_once = StaticOnce(self)
         elif self._mode != 'conveyor':
-            raise ValueError('mode must be conveyor, static_once or conveyor_once')
+            raise ValueError('mode must be conveyor, static_once, conveyor_once or conveyor_follow')
         # runtime-tunable lead (used by lead_calib): declared param wins over yaml
         k_lead = (self.get_parameter('k_lead').value if self.has_parameter('k_lead')
                   else self.declare_parameter('k_lead', params.get('k_lead', 0.05)).value)
@@ -407,7 +411,7 @@ class GraspControllerNode(Node):
             tf = self._tf_buffer.lookup_transform(
                 self._p['base_frame'], self._p['camera_optical_frame'],
                 rclpy.time.Time.from_msg(self._color_stamp),
-                timeout=rclpy.duration.Duration(seconds=0.1))
+                timeout=rclpy.duration.Duration(seconds=self._p['infer_tf_timeout']))
         except TransformException as e:
             self.get_logger().debug(f'TF for inference failed: {e}')
             return
@@ -514,6 +518,7 @@ _DEFAULTS = {
     'base_frame': 'base_link',
     'camera_optical_frame': 'camera_color_optical_frame',
     'model_path': '/home/ubuntu22/grasp/robotic-grasping/trained-models/jacquard-rgbd-grconvnet3-drop0-ch32',
+    'infer_tf_timeout': .1,
     'infer_max_rate': 10.0, 'result_max_age': 0.2, 'q_threshold': 0.25,
     'inference_device': 'cuda',
     'belt_file': '',

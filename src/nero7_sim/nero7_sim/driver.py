@@ -53,6 +53,8 @@ class SimDriver(Node):
         self.actual_pose = None
         self.width, self.width_goal = .07, .07
         self.trajectory, self.planning = None, None
+        self.stream_target, self.stream_at = None, 0.
+        self.stream_timeout = float(declare('stream_timeout', .08))
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.last_time = self.seconds()
         self.command = self.create_publisher(Float64MultiArray, 'gazebo/joint_commands', 10)
@@ -63,6 +65,7 @@ class SimDriver(Node):
         self.create_subscription(JointState, 'gazebo/joint_states', self.raw, 10)
         self.create_subscription(PoseStamped, 'gazebo/flange_pose', self.raw_pose, 10)
         self.create_subscription(JointState, 'control/move_j', self.move_j, 10)
+        self.create_subscription(JointState, 'control/move_js', self.move_js, 1)
         self.create_subscription(PoseStamped, 'control/move_l', self.move_l, 10)
         self.create_subscription(PoseStamped, 'control/move_p', self.move_l, 10)
         self.create_subscription(JointState, 'control/joint_states', self.grip, 10)
@@ -96,15 +99,40 @@ class SimDriver(Node):
         return response
 
     def stop(self, request, response):
-        self.enabled = False; self.trajectory = None
+        self.enabled = False; self.trajectory = None; self.stream_target = None
         if self.planning is not None: self.planning.cancel()
         self.planning = None
         if self.actual_q is not None: self.q = self.actual_q.copy()
         self.width_goal = self.width = self.actual_width
         return response
 
+    def move_js(self, msg):
+        """AGX-compatible immediate joint-position stream, without interpolation.
+
+        Gazebo remains the source of feedback. A missing stream holds actual
+        joints and latches a fault; this fixture does not emulate CAN dynamics.
+        """
+        if not self.enabled:
+            return
+        names = [f'joint{i}' for i in range(1, 8)]
+        if (len(msg.name) != 7 or set(msg.name) != set(names) or len(msg.position) != 7):
+            self.fault = 1
+            return
+        mapping = dict(zip(msg.name, msg.position))
+        target = np.array([mapping[name] for name in names], float)
+        if (not np.isfinite(target).all() or np.any(target < self.kin.lower)
+                or np.any(target > self.kin.upper)):
+            self.fault = 1
+            return
+        if self.planning is not None:
+            self.planning.cancel()
+            self.planning = None
+        self.trajectory = None
+        self.stream_target, self.stream_at = target, self.seconds()
+
     def move_j(self, msg):
         if not self.enabled: return
+        self.stream_target = None
         goal = np.array(msg.position[:7], float)
         if goal.shape != (7,) or not np.isfinite(goal).all() or np.any(goal<self.kin.lower) or np.any(goal>self.kin.upper):
             self.fault = 1; return
@@ -114,6 +142,7 @@ class SimDriver(Node):
 
     def move_l(self, msg):
         if not self.enabled or self.planning is not None: return
+        self.stream_target = None
         try:
             p, q = msg.pose.position, msg.pose.orientation
             position = np.array([p.x, p.y, p.z])
@@ -145,6 +174,15 @@ class SimDriver(Node):
             self.q = np.array([np.interp(elapsed, times, positions[:, i]) for i in range(7)])
             moving = elapsed < times[-1]
             if not moving: self.trajectory = None
+        if self.stream_target is not None:
+            if now-self.stream_at > self.stream_timeout:
+                self.fault, self.enabled, self.stream_target = 1, False, None
+                if self.actual_q is not None: self.q = self.actual_q.copy()
+                self.width_goal = self.width = self.actual_width
+                self.get_logger().error('Continuous joint stream timed out')
+            else:
+                self.q = self.stream_target.copy()
+                moving = True
         self.width += float(np.clip(self.width_goal-self.width, -self.gripper_speed*dt, self.gripper_speed*dt))
         self.command.publish(Float64MultiArray(data=[*self.q.tolist(), self.width]))
         # Feedback must come from Gazebo, never from the requested trajectory.

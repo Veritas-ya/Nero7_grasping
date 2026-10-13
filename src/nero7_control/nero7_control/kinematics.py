@@ -32,6 +32,26 @@ class Kinematics:
             T = T @ origin @ A
         return T
 
+    def jacobian(self, q, tcp=None):
+        """Spatial geometric Jacobian at the flange or calibrated TCP."""
+        q = np.asarray(q, float)
+        if q.shape != (7,) or not np.isfinite(q).all():
+            raise ValueError('Jacobian requires seven finite joint angles')
+        T = np.eye(4)
+        axes, origins = [], []
+        for angle, (origin, axis) in zip(q, self.joints):
+            T = T@origin
+            axes.append(T[:3, :3]@axis)
+            origins.append(T[:3, 3].copy())
+            A = np.eye(4)
+            A[:3, :3] = Rotation.from_rotvec(axis*angle).as_matrix()
+            T = T@A
+        tip = T[:3, 3]
+        if tcp is not None:
+            tip = tip+T[:3, :3]@np.asarray(tcp, float)
+        axes, origins = np.asarray(axes), np.asarray(origins)
+        return np.vstack([np.cross(axes, tip-origins).T, axes.T])
+
     def solve(self, position, rotation, seed):
         def residual(q):
             T = self.fk(q)

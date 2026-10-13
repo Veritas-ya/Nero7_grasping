@@ -33,7 +33,7 @@ def minimal_urdf(path):
     path.write_text('<robot name="test">'+joints+'</robot>')
 
 
-@pytest.mark.parametrize('mode', ['conveyor', 'static_once', 'conveyor_once'])
+@pytest.mark.parametrize('mode', ['conveyor', 'static_once', 'conveyor_once', 'conveyor_follow'])
 def test_formal_modes_start_without_parameter_collisions_or_commands(tmp_path, mode):
     urdf = tmp_path/'test.urdf'
     minimal_urdf(urdf)
@@ -78,7 +78,7 @@ def test_detector_constructs_and_diagnostics_runs_with_actual_ros_types():
         node.destroy_node()
 
 
-@pytest.mark.parametrize('filename', ['bringup.launch.py', 'dry_run.launch.py'])
+@pytest.mark.parametrize('filename', ['bringup.launch.py', 'dry_run.launch.py', 'follow_preview.launch.py'])
 def test_installed_launch_configuration_paths_and_overrides(filename):
     from launch import LaunchContext
     from launch.actions import DeclareLaunchArgument
@@ -91,7 +91,8 @@ def test_installed_launch_configuration_paths_and_overrides(filename):
         if isinstance(entity, DeclareLaunchArgument):
             context.launch_configurations[entity.name] = ''.join(
                 item.perform(context) for item in entity.default_value)
-    assert Path(context.launch_configurations['perception_params']).is_file()
+    if 'perception_params' in context.launch_configurations:
+        assert Path(context.launch_configurations['perception_params']).is_file()
     assert Path(context.launch_configurations['controller_params']).is_file()
     assert context.launch_configurations['execution_enabled'] == 'false'
 
