@@ -145,6 +145,7 @@ def initialize_servo(actor):
     actor.sync_since, actor.sync_pose_stamp, actor.sync_frames = None, None, 0
     actor.last_pose_stamp = 0.
     actor.grip_goal, actor.grip_width, actor.grip_counter = .07, .07, 0
+    actor.grip_confirmed = False
     actor.grip_verified_count, actor.grip_verified_since, actor.grip_blocked_frames = 0, None, 0
     actor._gripper_fresh = lambda: True
     actor._actual = lambda: (actor.q[:3].copy(), Rotation.identity())
@@ -260,3 +261,37 @@ def test_live_flange_guard_checks_tcp_offset_in_addition_to_tip_region():
     with pytest.raises(ValueError, match='flange'):
         actor._servo(.2, .2)
     actor.arm.stream_joints.assert_not_called()
+
+
+def test_early_speed_match_waits_for_the_preflight_descent_time():
+    actor = actor_base()
+    initialize_servo(actor)
+    actor.clock, actor.last_tick = .4, .38
+    actor.q[0] = .028*.4
+    actor.q_command = actor.q.copy()
+    actor.sync_since, actor.sync_frames, actor.sync_pose_stamp = .1, 12, .38
+    actor.last_pose_stamp = .4
+    actor._measured = lambda now: (actor.q[:3].copy(), Rotation.identity(), np.array([.028, 0., 0.]))
+    actor._servo(.4, .4)
+    assert actor.state == 'FOLLOW_SYNC'
+    actor.arm.move_gripper.assert_not_called()
+
+
+def test_early_grip_confirmation_keeps_following_until_preflight_lift_time():
+    actor = actor_base()
+    initialize_servo(actor)
+    actor.state, actor.clock, actor.last_tick = 'FOLLOW_CLOSE', .5, .48
+    actor.q[:3] = [.028*.5, 0., actor.plan['low_z']]
+    actor.q_command = actor.q.copy()
+    actor.grip_width = .024
+    actor._grasp_verified = Mock(return_value=True)
+    actor._measured = lambda now: (actor.q[:3].copy(), Rotation.identity(), np.array([.028, 0., 0.]))
+    actor._servo(.5, .5)
+    assert actor.grip_confirmed and actor.state == 'FOLLOW_CLOSE'
+    actor.clock, actor.last_tick = 1.21, 1.19
+    actor.q[0] = .028*1.21
+    actor.q_command = actor.q.copy()
+    actor._live_or_frozen = Mock(side_effect=AssertionError('Captured object must not need visibility'))
+    actor._servo(1.21, 1.21)
+    assert actor.state == 'FOLLOW_LIFT'
+    actor._live_or_frozen.assert_not_called()

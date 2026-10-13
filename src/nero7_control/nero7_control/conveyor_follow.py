@@ -91,7 +91,7 @@ class ConveyorFollow(StaticOnce):
         self.sync_since, self.sync_pose_stamp, self.sync_frames = None, None, 0
         self.last_tick = None
         self.q_command, self.q_velocity = None, np.zeros(7)
-        self.frozen = None
+        self.frozen, self.grip_confirmed = None, False
         self.last_preview, self.last_infer = -float('inf'), -float('inf')
         self.last_skip, self.retry_at = None, 0.
         self.rejected_until, self.acquisition_at = {}, 0.
@@ -576,14 +576,20 @@ class ConveyorFollow(StaticOnce):
                 z, vz = smooth_segment(self.lift_start[2], self.lift_start[2]+self.lift_offset,
                                        elapsed, self.lift_seconds)
                 velocity = self.held_velocity
-                if elapsed > self.lift_seconds+.4:
-                    raise ValueError('Following lift failed to reach its clearance')
+
             else:
                 delta, velocity = brake_displacement(self.held_velocity, elapsed+self.latency, self.brake_seconds)
                 target_xy, z, vz = self.brake_start[:2]+delta, self.brake_start[2], 0.
             estimate = None
         else:
-            estimate = self._live_or_frozen(now)
+            if self.state == 'FOLLOW_CLOSE' and self.grip_confirmed:
+                if not self._gripper_fresh() or self.grip_width <= self.plan['close_width']+.003:
+                    raise ValueError('Confirmed grasp was lost during the planned close interval')
+                estimate = dict(
+                    position=self.grip_start[:2]+self.held_velocity*(now-self.grip_confirmed_at+self.latency),
+                    velocity=self.held_velocity, covariance=np.zeros((2, 2)))
+            else:
+                estimate = self._live_or_frozen(now)
             window = interception_window(estimate['position'], estimate['velocity'], self.region,
                 0., self._remaining_follow(elapsed), self.margin)
             if window['entry'] > 1e-6:
@@ -592,30 +598,39 @@ class ConveyorFollow(StaticOnce):
             good = self._matched(estimate, tip, tip_velocity)
             if self.state == 'FOLLOW_SYNC':
                 z, vz = self.plan['high_z'], 0.
-                if elapsed > self.sync_timeout:
-                    raise ValueError('Measured end-effector velocity did not synchronize in time')
-                if self._stable_match(good and abs(tip[2]-z) < .006, now):
+                stable = self._stable_match(good and abs(tip[2]-z) < .006, now)
+                # Preflight uses fixed phase durations. Reaching synchronization
+                # early does not shift the descent to an unchecked upstream pose.
+                if elapsed >= self.sync_timeout:
+                    if not stable:
+                        raise ValueError('Measured end-effector velocity did not synchronize in time')
                     self._set('FOLLOW_DESCEND')
-                    elapsed = 0.
             elif self.state == 'FOLLOW_DESCEND':
                 z, vz = smooth_segment(self.plan['high_z'], self.plan['low_z'], elapsed, self.descend)
+                stable = self._stable_match(good, now)
                 if not good and elapsed > .2:
                     raise ValueError('Relative position/speed left capture limits during descent')
-                if elapsed > self.descend+.4:
-                    raise ValueError('Following descent timed out')
-                if elapsed >= self.descend and abs(tip[2]-self.plan['low_z']) < .006 and self._stable_match(good, now):
+                if elapsed >= self.descend:
+                    if abs(tip[2]-self.plan['low_z']) >= .006 or not stable:
+                        raise ValueError('Following descent missed its verified contact time')
                     self.grip_verified_since, self.grip_verified_count, self.grip_blocked_frames = None, self.grip_counter, 0
+                    self.grip_confirmed = False
                     self._grip(self.plan['close_width'], 'FOLLOW_CLOSE')
-                    elapsed = 0.
             else:
                 z, vz = self.plan['low_z'], 0.
                 if not good:
                     raise ValueError('Relative motion/uncertainty became unsafe during closure')
-                if self._grasp_verified(elapsed):
-                    self.lift_start, self.held_velocity = tip.copy(), velocity.copy()
+                if not self.grip_confirmed and self._grasp_verified(elapsed):
+                    self.grip_confirmed = True
+                    self.grip_start, self.grip_confirmed_at = tip.copy(), now
+                    self.held_velocity = velocity.copy()
+                # Once grip feedback confirms capture, vision can be occluded.
+                # Keep following until the SAME close deadline used by preflight.
+                if elapsed >= self.close_timeout:
+                    if not self.grip_confirmed:
+                        raise ValueError('Empty/ambiguous grasp or gripper closure timed out')
+                    self.lift_start = tip.copy()
                     self._set('FOLLOW_LIFT')
-                elif elapsed > self.close_timeout:
-                    raise ValueError('Empty/ambiguous grasp or gripper closure timed out')
         target = np.r_[target_xy, z]
         if not in_region(target_xy, self.region, self.margin):
             raise ValueError('Following reference left the grasp region')
@@ -642,6 +657,8 @@ class ConveyorFollow(StaticOnce):
             if abs(tip[2]-(self.lift_start[2]+self.lift_offset)) < .006:
                 self.brake_start = target.copy()
                 self._set('FOLLOW_BRAKE')
+            else:
+                raise ValueError('Following lift missed its verified clearance time')
         elif phase == 'FOLLOW_BRAKE' and elapsed >= self.brake_seconds:
             if self._stable_match(np.linalg.norm(tip_velocity) < .008
                     and np.linalg.norm(tip-target) < .006, now):
