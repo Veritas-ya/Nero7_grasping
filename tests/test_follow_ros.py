@@ -102,3 +102,69 @@ def test_installed_follow_config_and_explicit_overrides_start_in_preview(tmp_pat
     finally:
         node._static_once.shutdown()
         node.destroy_node()
+
+
+@pytest.fixture
+def follow_node(tmp_path):
+    urdf = tmp_path/'feedback.urdf'
+    minimal_urdf(urdf)
+    initializer = Node.__init__
+    def initialize(instance, *args, **kwargs):
+        return initializer(instance, *args, parameter_overrides=[
+            Parameter('mode', value='conveyor_follow'), Parameter('urdf_path', value=str(urdf)),
+            Parameter('visualization_enabled', value=False)], **kwargs)
+    with patch.object(Node, '__init__', initialize):
+        node = GraspControllerNode()
+    yield node
+    node._static_once.shutdown()
+    node.destroy_node()
+
+
+def test_feedback_joint_names_are_mapped_and_duplicate_stamp_is_not_new(follow_node):
+    actor = follow_node._static_once
+    msg = JointState()
+    msg.header.stamp = follow_node.get_clock().now().to_msg()
+    msg.name = ['joint%d' % i for i in range(7, 0, -1)]+['gripper']
+    msg.position = [.01*i for i in range(7, 0, -1)]+[.04]
+    actor._joint_feedback(msg)
+    assert actor._joints() == pytest.approx([.01*i for i in range(1, 8)])
+    msg.position = [.5]*8
+    actor._joint_feedback(msg)
+    assert actor._joints() == pytest.approx([.01*i for i in range(1, 8)])
+    msg.header.stamp.sec -= 1
+    actor._joint_feedback(msg)
+    assert actor._joints() == pytest.approx([.01*i for i in range(1, 8)])
+
+
+def test_duplicate_or_invalid_pose_cannot_replace_accepted_feedback(follow_node):
+    from geometry_msgs.msg import PoseStamped
+    actor = follow_node._static_once
+    msg = PoseStamped()
+    msg.header.stamp = follow_node.get_clock().now().to_msg()
+    msg.pose.position.x = .1
+    msg.pose.orientation.w = 1.
+    actor._pose_cb(msg)
+    assert actor._actual()[0] == pytest.approx([.1, 0., 0.])
+    msg.pose.position.x = 100.
+    actor._pose_cb(msg)
+    assert actor._actual()[0] == pytest.approx([.1, 0., 0.])
+    msg.header.stamp = follow_node.get_clock().now().to_msg()
+    msg.pose.orientation.w = float('nan')
+    actor._pose_cb(msg)
+    assert actor._actual()[0] == pytest.approx([.1, 0., 0.])
+
+
+def test_old_gripper_message_cannot_confirm_grip_or_clear_a_current_fault(follow_node):
+    from agx_arm_msgs.msg import GripperStatus
+    actor = follow_node._static_once
+    msg = GripperStatus(width=.024, driver_error_status=True)
+    msg.header.stamp = follow_node.get_clock().now().to_msg()
+    actor._gripper_feedback(msg)
+    assert actor.grip_counter == 1 and actor.grip_fault
+    msg.width, msg.driver_error_status = 0., False
+    actor._gripper_feedback(msg)
+    assert actor.grip_counter == 1 and actor.grip_fault
+    assert actor.grip_width == .024
+    msg.header.stamp.sec -= 1
+    actor._gripper_feedback(msg)
+    assert actor.grip_counter == 1 and actor.grip_fault

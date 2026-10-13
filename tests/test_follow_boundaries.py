@@ -20,7 +20,7 @@ FOLLOW = production_class('src/nero7_control/nero7_control/conveyor_follow.py', 
          forecast_motion=forecast_motion, motion_at_contact=motion_at_contact,
          **{name: getattr(fm, name) for name in (
              'vector', 'in_region', 'interception_window', 'smooth_segment',
-             'brake_displacement', 'matched', 'resolved_rate', 'TipVelocity')}))
+             'brake_displacement', 'matched', 'resolved_rate', 'TipVelocity', 'flange_in_workspace', 'arm_fault')}))
 
 
 class CartesianPlant:
@@ -149,6 +149,8 @@ def initialize_servo(actor):
     actor._gripper_fresh = lambda: True
     actor._actual = lambda: (actor.q[:3].copy(), Rotation.identity())
     actor.arm.get_joint_state.side_effect = lambda: actor.q.copy()
+    actor._joints = lambda: actor.q.copy()
+    actor.node._p['workspace'] = dict(x_min=-.4, x_max=.4, y_min=-.3, y_max=.3, z_min=-.1)
     actor.arm.move_gripper.side_effect = lambda width, **kwargs: setattr(actor, 'grip_goal', width)
     actor._live_or_frozen = lambda now: dict(position=np.array([.028*(now+actor.latency), 0.]),
         velocity=np.array([.028, 0.]), covariance=np.eye(2)*1e-6)
@@ -238,3 +240,23 @@ def test_sim_driver_stream_is_latest_only_and_never_pretends_to_be_feedback():
     assert driver.trajectory is None
     driver.move_js(NS(name=['joint1'], position=[.1]))
     assert driver.fault == 1
+
+@pytest.mark.parametrize('field', ['joint_angle_limit', 'communication_status_joint'])
+def test_joint_fault_flags_stop_even_when_numeric_err_status_is_zero(field):
+    actor = actor_base()
+    setattr(actor.status, field, [False, True]+[False]*5)
+    actor.tick()
+    assert actor.state == 'FOLLOW_ABORT'
+    actor.arm.estop.assert_called_once()
+    actor.arm.stream_joints.assert_not_called()
+
+
+def test_live_flange_guard_checks_tcp_offset_in_addition_to_tip_region():
+    actor = actor_base()
+    initialize_servo(actor)
+    actor.clock, actor.last_tick = .2, .18
+    actor.tcp = np.array([.5, 0., 0.])
+    actor._measured = lambda now: (np.array([0., 0., .12]), Rotation.identity(), np.array([.028, 0, 0]))
+    with pytest.raises(ValueError, match='flange'):
+        actor._servo(.2, .2)
+    actor.arm.stream_joints.assert_not_called()

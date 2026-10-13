@@ -14,6 +14,7 @@ target = Path(parser.parse_args().output_dir)/'agx_arm_msgs'
   <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>rosidl_default_generators</build_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
+  <depend>std_msgs</depend>
   <member_of_group>rosidl_interface_packages</member_of_group>
 </package>
 ''')
@@ -21,10 +22,11 @@ target = Path(parser.parse_args().output_dir)/'agx_arm_msgs'
 project(agx_arm_msgs)
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-rosidl_generate_interfaces(${PROJECT_NAME} "msg/AgxArmStatus.msg" "msg/GripperStatus.msg")
+find_package(std_msgs REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME} "msg/AgxArmStatus.msg" "msg/GripperStatus.msg" DEPENDENCIES std_msgs)
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()
 ''')
-(target/'msg/AgxArmStatus.msg').write_text('uint8 arm_status\nuint8 motion_status\nuint32 err_status\n')
-(target/'msg/GripperStatus.msg').write_text('float64 width\n')
+(target/'msg/AgxArmStatus.msg').write_text('uint8 arm_status\nuint8 motion_status\nuint32 err_status\nbool[] joint_angle_limit\nbool[] communication_status_joint\n')
+(target/'msg/GripperStatus.msg').write_text('std_msgs/Header header\nfloat64 width\nbool driver_enable_status\nbool driver_error_status\n')
 print(target)

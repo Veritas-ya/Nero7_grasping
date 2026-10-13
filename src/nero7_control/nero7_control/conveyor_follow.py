@@ -11,6 +11,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from geometry_msgs.msg import Pose, PoseArray
 from std_msgs.msg import String
+from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
 from agx_arm_msgs.msg import GripperStatus
 
@@ -20,7 +21,7 @@ from .plan_validity import seed_matches
 from .conveyor_prediction import motion_at_contact, forecast_motion
 from .follow_math import (vector, region_box, in_region, interception_window,
     smooth_segment, brake_displacement, TipVelocity, matched, resolved_rate,
-    preflight_follow)
+    preflight_follow, flange_in_workspace, arm_fault)
 
 
 class ConveyorFollow(StaticOnce):
@@ -83,7 +84,8 @@ class ConveyorFollow(StaticOnce):
         self.offset_xy = np.zeros(2)
         self.offset_covariance = np.eye(2)*.003**2
         self.velocity_feedback = TipVelocity()
-        self.last_pose_stamp = None
+        self.last_pose_stamp, self.last_joint_stamp, self.last_grip_stamp = None, None, None
+        self.joint_sample, self.joint_received, self.grip_fault = None, 0., False
         self.grip_width, self.grip_time, self.grip_counter = None, 0., 0
         self.grip_verified_since, self.grip_verified_count = None, 0
         self.sync_since, self.sync_pose_stamp, self.sync_frames = None, None, 0
@@ -99,6 +101,8 @@ class ConveyorFollow(StaticOnce):
             events=[], diagnostics={}, trajectory=[])
         self.pub_preview = node.create_publisher(String, '/grasp/follow/diagnostics', 1)
         self.pub_path = node.create_publisher(PoseArray, '/grasp/follow/trajectory', 1)
+        node.create_subscription(JointState, node._p['topic_prefix']+'feedback/joint_states',
+                                 self._joint_feedback, 5)
         node.create_subscription(GripperStatus, node._p['topic_prefix']+'feedback/gripper_status',
                                  self._gripper_feedback, 5)
 
@@ -121,34 +125,77 @@ class ConveyorFollow(StaticOnce):
         self.report['failure'] = self.failure
 
     def _pose_cb(self, msg):
-        super()._pose_cb(msg)
         if not hasattr(self, 'velocity_feedback'):
+            super()._pose_cb(msg)
             return
         stamp = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
         now = self.node.get_clock().now().nanoseconds*1e-9
-        if msg.header.frame_id not in ('', 'base_link') or not 0 <= now-stamp <= .15:
+        if (msg.header.frame_id not in ('', 'base_link') or not 0 <= now-stamp <= .15
+                or (self.last_pose_stamp is not None and stamp <= self.last_pose_stamp)):
             return
+        p, q = msg.pose.position, msg.pose.orientation
         try:
-            p, rotation = self._actual()
-            if self.velocity_feedback.add(stamp, p+rotation.apply(self.tcp)):
+            point = vector([p.x, p.y, p.z], 3, 'flange feedback')
+            quaternion = vector([q.x, q.y, q.z, q.w], 4, 'flange orientation')
+            if abs(np.linalg.norm(quaternion)-1.) > 1e-3:
+                return
+            rotation = Rotation.from_quat(quaternion)
+            if self.velocity_feedback.add(stamp, point+rotation.apply(self.tcp)):
+                super()._pose_cb(msg)
                 self.last_pose_stamp = stamp
         except ValueError:
             return
 
+    def _joint_feedback(self, msg):
+        stamp = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+        now = self.node.get_clock().now().nanoseconds*1e-9
+        if (not 0 <= now-stamp <= .15 or len(msg.name) != len(msg.position)
+                or len(set(msg.name)) != len(msg.name)
+                or (self.last_joint_stamp is not None and stamp <= self.last_joint_stamp)):
+            return
+        mapping = dict(zip(msg.name, msg.position))
+        names = [f'joint{i}' for i in range(1, 8)]
+        if not all(name in mapping for name in names):
+            return
+        try:
+            sample = vector([mapping[name] for name in names], 7, 'joint feedback')
+        except ValueError:
+            return
+        self.joint_sample, self.last_joint_stamp = sample, stamp
+        self.joint_received = time.monotonic()
+
+    def _joints(self):
+        return vector(self.joint_sample, 7, 'accepted joint feedback').copy()
+
     def _gripper_feedback(self, msg):
+        stamp = msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
+        now = self.node.get_clock().now().nanoseconds*1e-9
+        fault = any(getattr(msg, flag, False) for flag in (
+            'voltage_too_low', 'motor_overheating', 'driver_overcurrent',
+            'driver_overheating', 'sensor_status', 'driver_error_status'))
+        if (not 0 <= now-stamp <= .15
+                or (self.last_grip_stamp is not None and stamp <= self.last_grip_stamp)):
+            return
+        self.grip_fault = bool(fault)
         width = float(msg.width)
         if np.isfinite(width) and 0 <= width <= self.open_width+.005:
-            self.grip_width, self.grip_time = width, time.monotonic()
+            self.grip_width, self.grip_time, self.last_grip_stamp = width, time.monotonic(), stamp
             self.grip_counter += 1
 
     def _gripper_fresh(self):
-        return self.grip_width is not None and time.monotonic()-self.grip_time < .2
+        now = self.node.get_clock().now().nanoseconds*1e-9
+        return (self.grip_width is not None and self.last_grip_stamp is not None
+                and time.monotonic()-self.grip_time < .2
+                and 0 <= now-self.last_grip_stamp <= .15)
 
     def _fresh(self):
-        if not super()._fresh() or self.last_pose_stamp is None:
+        if (not super()._fresh() or self.last_pose_stamp is None
+                or self.last_joint_stamp is None):
             return False
         now = self.node.get_clock().now().nanoseconds*1e-9
-        return 0 <= now-self.last_pose_stamp <= .15 and self._gripper_fresh()
+        return (0 <= now-self.last_pose_stamp <= .15
+                and 0 <= now-self.last_joint_stamp <= .15
+                and time.monotonic()-self.joint_received < .2 and self._gripper_fresh())
 
     def _observe(self, now):
         for tr in self.node._tracks:
@@ -273,7 +320,7 @@ class ConveyorFollow(StaticOnce):
             estimate = self._estimate(owner, now)
             window = interception_window(estimate['position'], estimate['velocity'], self.region,
                 self.prepare+self.approach+self.reserve, self.duration, self.margin)
-            seed = vector(self.arm.get_joint_state()[:7], 7, 'plan seed')
+            seed = vector(self._joints(), 7, 'plan seed')
             position, rotation = self._actual()
             snapshot = dict(id=owner.id, belt_z=float(owner.belt_z),
                 estimate=estimate, window=window, planned_at=now, seed=seed.copy(),
@@ -374,7 +421,7 @@ class ConveyorFollow(StaticOnce):
                 raise ValueError('Object-relative grasp changed after preflight')
         if before_motion:
             position, rotation = self._actual()
-            if not seed_matches(self.plan, self.arm.get_joint_state(), position, rotation):
+            if not seed_matches(self.plan, self._joints(), position, rotation):
                 raise ValueError('Arm moved after follow preflight')
         return tr, estimate
 
@@ -427,7 +474,7 @@ class ConveyorFollow(StaticOnce):
         self.pub_preview.publish(String(data=json.dumps(report)))
 
     def _start_servo(self):
-        self.q_command = vector(self.arm.get_joint_state()[:7], 7, 'servo seed').copy()
+        self.q_command = vector(self._joints(), 7, 'servo seed').copy()
         self.q_velocity = np.zeros(7)
         self.last_tick = self._motion_time()
         self._set('FOLLOW_SYNC')
@@ -567,7 +614,11 @@ class ConveyorFollow(StaticOnce):
         target = np.r_[target_xy, z]
         if not in_region(target_xy, self.region, self.margin):
             raise ValueError('Following reference left the grasp region')
-        joints = vector(self.arm.get_joint_state()[:7], 7, 'servo joint feedback')
+        ws = self.node._p['workspace']
+        if not (flange_in_workspace(tip-actual_rotation.apply(self.tcp), ws)
+                and flange_in_workspace(target-self.plan['rotation'].apply(self.tcp), ws)):
+            raise ValueError('Actual/reference flange left the configured workspace')
+        joints = vector(self._joints(), 7, 'servo joint feedback')
         T = self.kin.fk(joints)
         fk_tip = T[:3, 3]+T[:3, :3]@self.tcp
         if np.linalg.norm(fk_tip-tip) > .006:
@@ -575,6 +626,8 @@ class ConveyorFollow(StaticOnce):
         command, qd, _ = resolved_rate(self.kin, joints, self.q_command, self.q_velocity,
             self.tcp, target, self.plan['rotation'], np.r_[velocity, vz], dt, self.gain,
             self.joint_speed, self.joint_accel, self.linear_speed, self.angular_speed)
+        if not flange_in_workspace(self.kin.fk(command)[:3, 3], ws):
+            raise ValueError('Next joint command would leave the flange workspace')
         self.arm.stream_joints(command.tolist())
         self.q_command, self.q_velocity = command, qd
         self.report['diagnostics'].update(target_tcp_m=target.tolist(), actual_tcp_m=tip.tolist(),
@@ -604,7 +657,7 @@ class ConveyorFollow(StaticOnce):
                 if self.motion_issued:
                     raise ValueError('Arm/pose/gripper feedback stale during following')
                 return
-            if self.status.err_status or self.status.arm_status in (1, 5, 7, 9, 10):
+            if arm_fault(self.status) or getattr(self, 'grip_fault', False):
                 raise ValueError('Driver fault during following')
             self._observe(now)
             elapsed = self._motion_time()-self.started

@@ -218,3 +218,16 @@ def preflight_follow(kin, seed, tcp, rotation, tips, workspace, belt_z,
         previous = q
         solutions.append(q.copy())
     return np.asarray(solutions)
+
+def flange_in_workspace(point, workspace):
+    point = vector(point, 3, 'flange workspace point')
+    return bool(workspace['x_min'] <= point[0] <= workspace['x_max']
+        and workspace['y_min'] <= point[1] <= workspace['y_max']
+        and point[2] >= workspace['z_min'])
+
+
+def arm_fault(status):
+    """Use both the numeric status and AGX's published per-joint flags."""
+    return bool(status.arm_status != 0 or getattr(status, 'err_status', 0)
+        or any(getattr(status, 'joint_angle_limit', []))
+        or any(getattr(status, 'communication_status_joint', [])))
