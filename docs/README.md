@@ -26,6 +26,9 @@ Gazebo 示例的启动、真机参数对应关系及验证方法见
 和[只读采集/验证方法](perception_validation.md)已提供。新模式包括基座系固定高度、
 三维平面和 RGB/深度融合；默认保留 legacy_depth 对照，新模式需先校核空带标定文件。
 
+当前现场使用的原尺寸测速画面、稳定 ID 配置及启动命令见
+[camera_speed_preview.md](camera_speed_preview.md)。
+
 ## 依赖（已就绪的机器环境）
 
 - ROS2 Humble + orbbec_camera（apt）+ cv_bridge/tf2

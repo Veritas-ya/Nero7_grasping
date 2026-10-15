@@ -54,6 +54,15 @@ def test_empty_belt_has_no_numeric_speed():
     assert put.call_args.args[1] == 'No tracked blocks - speed unavailable'
 
 
+def test_detection_error_hides_even_previously_valid_object_speed():
+    with patch('nero7_perception.speed_overlay.cv2.putText') as put:
+        draw_speed_overlay(np.zeros((480, 640, 3), np.uint8), [track()],
+                           error='Legacy plane fit unavailable')
+    labels = [call.args[1] for call in put.call_args_list]
+    assert labels == ['Detection unavailable - speed unavailable', 'Legacy plane fit unavailable']
+    assert not any('0.050' in label or 'No tracked blocks' in label for label in labels)
+
+
 def test_real_tracker_labels_update_and_lost_track_hides_old_speed():
     tracker = BlockTracker(BeltModel([0., -1.]), {})
     for i in range(45):
@@ -78,3 +87,29 @@ def test_debug_image_keeps_capture_timestamp_and_optical_frame():
     assert message.header.frame_id == 'camera_color_optical_frame'
     assert message.encoding == 'bgr8'
     assert detector._bridge.imgmsg_to_cv2(message, 'bgr8').any()
+
+
+def test_full_resolution_preview_preserves_camera_pixels_and_marker_coordinates():
+    detector = BlockDetectorNode.__new__(BlockDetectorNode)
+    detector._p = dict(camera_optical_frame='camera_color_optical_frame', debug_max_width=0)
+    detector._color = np.full((720, 1280, 3), 80, np.uint8)
+    detector._bridge, detector._pub_debug = CvBridge(), Mock()
+    detector._publish_debug([track(u_px=1000., v_px=500.)], Time(sec=123))
+    msg = detector._pub_debug.publish.call_args.args[0]
+    assert (msg.width, msg.height) == (1280, 720)
+    image = detector._bridge.imgmsg_to_cv2(msg, 'bgr8')
+    np.testing.assert_array_equal(image[600:], detector._color[600:])
+    assert np.any(image[490:510, 990:1010] != 80)
+
+
+def test_close_objects_keep_nonoverlapping_labels_with_their_own_ids():
+    rectangles = []
+    with patch('nero7_perception.speed_overlay.cv2.putText', wraps=cv2.putText) as put:
+        draw_speed_overlay(np.zeros((720, 1280, 3), np.uint8),
+                           [track(u_px=480., v_px=400.), track(id=8, u_px=650., v_px=410.)])
+    for call in put.call_args_list:
+        _, text, (x, y), font, scale, _, thickness = call.args[:7]
+        (w, h), baseline = cv2.getTextSize(text, font, scale, thickness)
+        rectangles.append((x-3, y-h-3, x+w+3, y+baseline+3))
+    first, second = rectangles
+    assert first[2] < second[0] or second[2] < first[0] or first[3] < second[1] or second[3] < first[1]

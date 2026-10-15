@@ -55,6 +55,21 @@ def test_expired_object_is_not_revived_as_a_valid_old_velocity():
     assert tracks[0].id != old_id and not tracks[0].speed_valid
 
 
+def test_preview_identity_retention_requalifies_speed_after_half_second_gap():
+    tracker = BlockTracker(BeltModel([0., -1.]), {}, lost_timeout=1.)
+    for i in range(61):
+        tracks = tracker.update([det(0.)], i/30)
+    tid = tracks[0].id
+    assert tracks[0].speed_valid
+    tracks = tracker.update([det(0.)], 2.65)
+    assert len(tracks) == 1 and tracks[0].id == tid
+    assert not tracks[0].speed_valid
+    for i in range(1, 20):
+        tracks = tracker.update([det(0.)], 2.65+i/30)
+    assert tracks[0].id == tid and tracks[0].speed_valid
+    assert tracker.update([], 4.5) == []
+
+
 def test_coherent_rejected_centroid_shift_keeps_id_but_resets_velocity():
     tracker = fitted()
     old_id = tracker.tracks[0].id
@@ -82,6 +97,22 @@ def test_second_object_near_matched_track_receives_its_own_id():
     tracker = fitted()
     tracks = tracker.update([det(2.+1/30), det(2.+1/30, shift=.020)], 2.+1/30)
     assert len(tracks) == 2 and len({t.id for t in tracks}) == 2
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_global_assignment_preserves_both_ids_when_greedy_match_strands_one(reverse):
+    tracker = BlockTracker(BeltModel([0., -1.]), {})
+    first, second = det(0.), det(0., shift=.008)
+    tracker.update([first, second], 10.)
+    observations = [det(0., shift=.001), det(0., shift=-.007)]
+    if reverse:
+        observations.reverse()
+    tracks = tracker.update(observations, 10.001)
+    assert len(tracks) == 2 and tracker._next_id == 2
+    assert [t.id for t in tracks] == [0, 1]
+    assert all(t.misses == 0 for t in tracks)
+    assert tracks[0].observed_centroid[0] == pytest.approx(first['centroid_base'][0]-.007)
+    assert tracks[1].observed_centroid[0] == pytest.approx(first['centroid_base'][0]+.001)
 
 
 def stamp(t):
@@ -140,11 +171,16 @@ def test_plane_height_cache_updates_after_transform_change():
     np.testing.assert_allclose(changed-first, .1, atol=1e-12)
 
 
-def test_source_configuration_resolves_shared_assets_without_a_machine_home():
+@pytest.mark.parametrize('filename', ['perception.yaml', 'camera_speed_preview.yaml'])
+def test_source_configuration_resolves_shared_assets_without_a_machine_home(filename):
     from pathlib import Path
+    import yaml
     from nero7_perception.detection import load_detection_params
-    config = Path(__file__).resolve().parents[1]/'config/perception.yaml'
+    config = Path(__file__).resolve().parents[1]/'config'/filename
+    configured = yaml.safe_load(config.read_text())['block_detector']['ros__parameters']
     params = load_detection_params(config)
-    assert Path(params['belt_file']).is_file()
-    assert Path(params['calibration_file']).is_file()
-    assert '/home/ubuntu22/' not in params['belt_file']
+    shared = config.parents[2]/'nero7_bringup/config'
+    for name, resource in [('belt_file', 'belt.yaml'), ('calibration_file', 'calibration.yaml')]:
+        assert not configured.get(name)  # Resolve resources relative to this checkout.
+        assert Path(params[name]).resolve() == (shared/resource).resolve()
+        assert Path(params[name]).is_file()

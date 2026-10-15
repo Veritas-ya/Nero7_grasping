@@ -37,6 +37,7 @@ jobs:
           src/nero7_control/test/test_conveyor_prediction.py
           src/nero7_control/test/test_kalman_control.py
           src/nero7_perception/test/test_tracking_regressions.py
+          src/nero7_perception/test/test_legacy_components.py
           src/nero7_perception/test/test_kalman_motion.py
           src/nero7_perception/test/test_visual_speed.py
           src/nero7_perception/test/test_depth_center.py

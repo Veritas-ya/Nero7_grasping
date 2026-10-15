@@ -52,7 +52,7 @@ class BlockDetectorNode(Node):
             ('plane_ransac_max_points', 5000),
             ('processing_rate_hz', 30.0),
             ('debug_rate_hz', 10.0),
-            ('debug_max_width', 640),
+            ('debug_max_width', 0),
             ('tracker_reacquire_samples', 3),
             ('tracker_reacquire_max_distance', .02),
             ('tracker_reacquire_consistency', .006),
@@ -322,11 +322,7 @@ class BlockDetectorNode(Node):
                 self._frame_count += 1
                 tracks = self._tracker.update(detections, depth_time)
                 self._publish_tracks(tracks, frame.stamp)
-                wall_now = time.perf_counter()
-                if self._pub_debug is not None and wall_now-getattr(self, '_last_debug_time', -np.inf) >= 1./self._p['debug_rate_hz']:
-                    self._publish_debug(tracks, frame.stamp)
-                    self._last_debug_time = wall_now
-                    self._diagnostics['debug_frames_published'] = self._diagnostics.get('debug_frames_published', 0)+1
+                self._publish_debug_if_due(tracks, frame.stamp)
                 self._diagnostics.update(processed_frames=self._diagnostics['processed_frames'] + 1,
                     detections=len(detections), process_ms=(time.perf_counter()-started)*1000,
                     sync_delta_ms=abs(color_time-depth_time)*1000,
@@ -336,6 +332,8 @@ class BlockDetectorNode(Node):
                 self._diagnostics['rejected_frames'] += 1
                 self._diagnostics['last_error'] = str(error)
                 self.get_logger().warning(f'Detection rejected: {error}', throttle_duration_sec=2.)
+                self._publish_debug_if_due([], color_stamp, image=color,
+                                           frame_id=color_frame, error=str(error))
         finally:
             self._processing = False
 
@@ -416,17 +414,24 @@ class BlockDetectorNode(Node):
             msg.tracks.append(t)
         self._pub_tracks.publish(msg)
 
-    def _publish_debug(self, tracks, stamp):
-        image = self._color
+    def _publish_debug_if_due(self, tracks, stamp, **kwargs):
+        wall_now = time.perf_counter()
+        if self._pub_debug is not None and wall_now-getattr(self, '_last_debug_time', -np.inf) >= 1./self._p['debug_rate_hz']:
+            self._publish_debug(tracks, stamp, **kwargs)
+            self._last_debug_time = wall_now
+            self._diagnostics['debug_frames_published'] = self._diagnostics.get('debug_frames_published', 0)+1
+
+    def _publish_debug(self, tracks, stamp, image=None, frame_id=None, error=None):
+        image = self._color if image is None else image
         width = self._p['debug_max_width']
         scale = min(1., width/image.shape[1]) if width else 1.
         if scale < 1.:
             image = cv2.resize(image, (int(round(image.shape[1]*scale)),
                                       int(round(image.shape[0]*scale))), interpolation=cv2.INTER_AREA)
-        img = draw_speed_overlay(image, tracks, pixel_scale=scale)
+        img = draw_speed_overlay(image, tracks, pixel_scale=scale, error=error)
         msg = self._bridge.cv2_to_imgmsg(img, 'bgr8')
         msg.header.stamp = stamp
-        msg.header.frame_id = self._p['camera_optical_frame']
+        msg.header.frame_id = self._p['camera_optical_frame'] if frame_id is None else frame_id
         self._pub_debug.publish(msg)
 
 

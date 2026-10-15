@@ -31,6 +31,8 @@ DETECTION_DEFAULTS = {
     'sync_buffer_size': 8,
     'color_rectified': False,
     'apply_d2c_offset': False,
+    'legacy_rgb_components': False,
+    'legacy_min_edge_support': .15,
     'lower_green': [35, 40, 40],
     'upper_green': [85, 255, 255],
     'gray_saturation_max': 70,
@@ -80,6 +82,8 @@ def load_detection_params(path):
 
 
 def validate_detection_config(params):
+    if not np.isfinite(params.get('legacy_min_edge_support', .15)) or not 0 <= params.get('legacy_min_edge_support', .15) <= 1:
+        raise ValueError('legacy_min_edge_support must lie in [0,1]')
     if params['detection_mode'] not in ('legacy_depth', 'depth_plane', 'rgb', 'rgb_depth'):
         raise ValueError('detection_mode must be legacy_depth/depth_plane/rgb/rgb_depth')
     if params['plane_mode'] not in ('fixed', 'ransac3d'):
@@ -227,7 +231,7 @@ def detect_legacy(color, depth, camera, transform, plane, params, refit=True):
     Strict alignment/encoding/time validation is performed by the caller. The
     baseline's optical-axis height is intentionally retained and clearly reported.
     """
-    check_depth_coverage(depth, params)
+    valid = check_depth_coverage(depth, params)
     roi = params['roi_px'] if any(params['roi_px']) else None
     if refit or plane.coeffs is None:
         plane.fit(depth, roi=roi)
@@ -236,8 +240,21 @@ def detect_legacy(color, depth, camera, transform, plane, params, refit=True):
     v_grid, u_grid = np.indices(depth.shape)
     plane_z = plane.plane_z(u_grid, v_grid)
     height = plane_z - depth
-    mask = ((height >= params['block_height_min']) & (height <= params['block_height_max'])
-            & roi_mask(depth.shape, roi)).astype(np.uint8)
+    fused_components = params.get('legacy_rgb_components', False)
+    selected = roi_mask(depth.shape, roi)
+    if fused_components:
+        # Group an object's visible layers before applying its median-height
+        # limit. The old per-pixel upper threshold can split a single stepped
+        # object, causing alternating centroids and duplicate track IDs.
+        _, gray = color_masks(color, params)
+        mask = (gray & valid & selected & (height >= params['block_height_min'])
+                & (height <= 2*params['block_height_max'])).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        mask &= selected.astype(np.uint8)
+        edges = cv2.Canny(cv2.GaussianBlur(cv2.cvtColor(color, cv2.COLOR_BGR2GRAY), (3, 3), 0), 40, 100)
+    else:
+        mask = ((height >= params['block_height_min']) & (height <= params['block_height_max'])
+                & selected).astype(np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     count, labels, stats, centers = cv2.connectedComponentsWithStats(mask, 8)
     detections = []
@@ -247,7 +264,25 @@ def detect_legacy(color, depth, camera, transform, plane, params, refit=True):
             continue
         u, v = centers[label]
         region = labels == label
-        z_top = float(np.median(depth[region]))
+        if fused_components:
+            # Smooth highlights may have a small stereo depth bias but lack
+            # the edges of a solid object. Do not assign them fresh IDs.
+            x, y, w, h = stats[label, :4]
+            x0, y0 = max(0, x-2), max(0, y-2)
+            x1, y1 = min(color.shape[1], x+w+2), min(color.shape[0], y+h+2)
+            component = region[y0:y1, x0:x1].astype(np.uint8)
+            edge_pixels = np.count_nonzero(edges[y0:y1, x0:x1] &
+                cv2.dilate(component, np.ones((5, 5), np.uint8)))
+            if edge_pixels < params['legacy_min_edge_support']*2*(w+h):
+                continue
+        usable = region & valid
+        if fused_components and (usable.sum() < params['depth_min_valid_pixels']
+                or usable.sum() < params['depth_min_valid_ratio']*area):
+            continue
+        object_height = float(np.median(height[usable]))
+        if fused_components and not params['block_height_min'] <= object_height <= params['block_height_max']:
+            continue
+        z_top = float(np.median(depth[usable]))
         if not np.isfinite(z_top) or z_top <= 0:
             continue
         ray = camera.rays([u], [v])[0]
@@ -257,6 +292,6 @@ def detect_legacy(color, depth, camera, transform, plane, params, refit=True):
         z_plane = plane_z[int(round(v)), int(round(u))]
         belt = transform[:3, :3] @ (ray * z_plane) + transform[:3, 3]
         detections.append(dict(u=float(u), v=float(v), centroid_base=point,
-                               height=float(np.median(height[region])), width_px=math.sqrt(area),
+                               height=object_height, width_px=math.sqrt(area),
                                area_px=float(area), belt_z=float(belt[2])))
     return detections, mask

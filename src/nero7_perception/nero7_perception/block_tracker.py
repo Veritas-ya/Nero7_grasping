@@ -1,5 +1,6 @@
 """Multi-object image tracking with timestamped XY Kalman motion estimates."""
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from .kalman_motion import KalmanMotion
 
@@ -192,12 +193,25 @@ class BlockTracker:
                                        track_index, detection_index))
 
         matched_tracks, matched_detections = set(), set()
-        for _, _, track_index, detection_index in sorted(candidates):
-            if track_index in matched_tracks or detection_index in matched_detections:
-                continue
-            if self.tracks[track_index].update(valid_detections[detection_index], t):
-                matched_tracks.add(track_index)
-                matched_detections.add(detection_index)
+        if candidates:
+            # Prefer retaining the largest set of existing IDs, then minimize
+            # total innovation. A locally nearest pair may otherwise strand
+            # another track that has only that one valid observation.
+            n_tracks, n_detections = len(self.tracks), len(valid_detections)
+            unmatched_cost = n_tracks+n_detections+1.
+            costs = np.full((n_tracks, n_detections+n_tracks), unmatched_cost)
+            costs[:, :n_detections] = np.inf
+            for distance_sq, distance, track_index, detection_index in candidates:
+                gate = self.tracks[track_index].motion.innovation_gate
+                physical_gate = self.gate_radius+self.max_vel*(t-self.tracks[track_index].stamp)
+                costs[track_index, detection_index] = distance_sq/gate+1e-6*distance/physical_gate
+            rows, columns = linear_sum_assignment(costs)
+            for track_index, detection_index in zip(rows, columns):
+                if detection_index >= n_detections:
+                    continue
+                if self.tracks[track_index].update(valid_detections[detection_index], t):
+                    matched_tracks.add(track_index)
+                    matched_detections.add(detection_index)
 
         suppressed = set()
         for detection_index, close_tracks in neighbors.items():

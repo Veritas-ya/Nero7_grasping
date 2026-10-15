@@ -27,7 +27,7 @@ block_detector:
     plane_ransac_max_points: 5000
     processing_rate_hz: 30.0  # 定时处理最新配对帧；相机回调仅入队
     debug_rate_hz: 10.0
-    debug_max_width: 640  # 0 保留全尺寸；仅调试图缩放，不改变检测坐标
+    debug_max_width: 0  # 保留相机原始分辨率；需要降采样时显式设置宽度
     tracker_reacquire_samples: 3
     tracker_reacquire_max_distance: 0.02
     tracker_reacquire_consistency: 0.006
