@@ -206,6 +206,7 @@ def test_detector_rejects_mismatched_grid_without_publishing(scenario):
     node._depth_source = DepthSource(Mock())
     node._depth_source._append(np.ones((120, 160)), stamp, camera.frame_id, camera)
     node._diagnostics = dict(processed_frames=0, rejected_frames=0)
+    node._pub_debug = None
     node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=100_000_000_000))
     node.get_logger = lambda: Mock()
     node._publish_tracks = Mock()
@@ -214,6 +215,40 @@ def test_detector_rejects_mismatched_grid_without_publishing(scenario):
     assert node._diagnostics['rejected_frames'] == 1
     node._publish_tracks.assert_not_called()
     node._get_camera_to_base_tf.assert_not_called()
+
+
+def test_failed_plane_fit_still_publishes_current_image_without_tracks(scenario):
+    from collections import deque
+    from cv_bridge import CvBridge
+    data, _, params, camera, _ = scenario
+    node = BlockDetectorNode.__new__(BlockDetectorNode)
+    stamp = Time(sec=100)
+    node._p = dict(params, detection_mode='legacy_depth', debug_rate_hz=10., debug_max_width=640)
+    node._camera, node._processing = camera, False
+    node._last_color_stamp = node._last_depth_stamp = -np.inf
+    color = data['color_bgr'][0]
+    node._colors = deque([(color, stamp, camera.frame_id)])
+    node._depth_source = DepthSource(Mock())
+    node._depth_source._append(data['depth_m'][0], stamp, camera.frame_id, camera)
+    node._diagnostics = dict(processed_frames=0, rejected_frames=0)
+    node._d2c, node._frame_count = (0, 0), 0
+    node._plane = Mock(coeffs=None)
+    node._pub_debug, node._bridge = Mock(), CvBridge()
+    node._color = np.zeros_like(color)  # A previous frame must not be displayed.
+    node._tracker, node._publish_tracks = Mock(), Mock()
+    node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=100_000_000_000))
+    node.get_logger = lambda: Mock()
+    node._get_camera_to_base_tf = Mock(return_value=(data['transforms'][0, :3, :3], data['transforms'][0, :3, 3]))
+    node._process()
+    node._process()  # Do not republish the same capture as a new frame.
+    node._publish_tracks.assert_not_called()
+    node._tracker.update.assert_not_called()
+    node._pub_debug.publish.assert_called_once()
+    message = node._pub_debug.publish.call_args.args[0]
+    assert message.header.stamp == stamp and message.header.frame_id == camera.frame_id
+    image = node._bridge.imgmsg_to_cv2(message, 'bgr8')
+    np.testing.assert_array_equal(image[80:], color[80:])
+    assert node._diagnostics['last_error'] == 'Legacy plane fit unavailable'
 
 
 def test_fused_sequence_keeps_id_and_visual_speed(scenario):

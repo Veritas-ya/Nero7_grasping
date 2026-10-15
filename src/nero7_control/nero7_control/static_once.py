@@ -13,6 +13,8 @@ from geometry_msgs.msg import PoseStamped
 from agx_arm_msgs.msg import AgxArmStatus
 from std_srvs.srv import SetBool
 from .kinematics import Kinematics, yaw_orientations
+from .plan_validity import candidate_matches, stationary_plan_current, seed_matches
+from concurrent.futures import ThreadPoolExecutor
 
 
 class StaticOnce:
@@ -33,8 +35,10 @@ class StaticOnce:
         self.motion_issued = False
         self.grip_goal = None
         self.failure = None
+        self.planning_future = None
+        self.static_planner = ThreadPoolExecutor(max_workers=1)
         declare = lambda key, default: node.declare_parameter(key, default).value
-        path = declare('calibration_file', '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml')
+        path = node.get_parameter('calibration_file').value
         with open(path) as f:
             self.calibration = yaml.safe_load(f)
         self.tcp = np.asarray(self.calibration['gripper_tcp'], float)
@@ -46,6 +50,7 @@ class StaticOnce:
         self.offset = float(declare('static_descend_offset', .018))
         self.clearance = float(declare('static_belt_clearance', .012))
         self.open_width = float(declare('static_open_width', .070))
+        self.plan_max_age = float(declare('static_plan_max_age', 5.))
         self.infer_timeout = float(declare('static_infer_timeout', 30.))
         self.plan_file = declare('static_plan_file', '/tmp/nero7_formal_static_plan.json')
         urdf = declare('urdf_path', '/home/ubuntu22/nero_ws/install/nero_description/share/nero_description/urdf/nero_description.urdf')
@@ -86,12 +91,22 @@ class StaticOnce:
         self._set('STATIC_ABORT')
 
     def shutdown(self):
+        if getattr(self, 'static_planner', None) is not None:
+            self.static_planner.shutdown(wait=False, cancel_futures=True)
         if self.motion_issued:
             future = self.arm.estop()
             if future is not None and self.node.context.ok():
                 rclpy.spin_until_future_complete(self.node, future, timeout_sec=.5)
                 if not future.done():
                     self.node.get_logger().error('Emergency stop acknowledgement timed out')
+
+    def _execution_enabled(self):
+        return bool(self.node.get_parameter('execution_enabled').value) and not self.node._p['dry_run']
+
+    def _seed_current(self):
+        position, rotation = self._actual()
+        return self.status.motion_status == 0 and seed_matches(
+            self.plan, self.arm.get_joint_state(), position, rotation)
 
     def _fresh(self):
         now = time.monotonic()
@@ -198,7 +213,11 @@ class StaticOnce:
                     rotation=rotation, joints=solutions, raw_width=raw_width,
                     close_width=close_width,
                     seed_joints=seed.copy(), seed_flange=actual.copy(),
-                    seed_rotation=actual_rotation)
+                    seed_rotation=actual_rotation,
+                    track_id=track.id, image_stamp=result.get('stamp', 0.),
+                    track_center=np.array([track.centroid_x, track.centroid_y,
+                        getattr(track, 'centroid_z', center[2])]),
+                    network_center=network_center, network_yaw=float(result['yaw']))
         output = dict(source=source, score=result['score'],
                       network_center_base=network_center.tolist(),
                       center_base=center.tolist(), fingertip_grasp=grasp.tolist(),
@@ -215,6 +234,9 @@ class StaticOnce:
         if self.state in ('STATIC_DONE', 'STATIC_ABORT'):
             return
         try:
+            if self.motion_issued and not self._execution_enabled():
+                self._abort('Execution disabled during active motion')
+                return
             if not self._fresh():
                 if self.motion_issued:
                     self._abort('Feedback stale')
@@ -228,7 +250,7 @@ class StaticOnce:
             stamp = now.nanoseconds*1e-9
             if self.state in ('STATIC_INFER', 'STATIC_READY'):
                 u0, v0, u1, v1 = self.roi
-                tracks = [t for t in self.node._tracks if t.status == 1 and stamp-t.stamp < .2
+                tracks = [t for t in self.node._tracks if t.status == 1 and 0 <= stamp-t.stamp < .2
                           and u0 <= t.u_px <= u1 and v0 <= t.v_px <= v1
                           and np.linalg.norm(t.velocity) < .015
                           and -.45 < t.centroid_x < .45 and -.35 < t.centroid_y < .35]
@@ -236,7 +258,10 @@ class StaticOnce:
                     if self._motion_time()-self.started > self.infer_timeout:
                         self._abort('No stationary confirmed target')
                     return
-                track = min(tracks, key=lambda t: abs(t.centroid_x+.36)+abs(t.centroid_y-.20))
+                track = next((t for t in tracks if self.track is not None and t.id == self.track.id), None)
+                if track is None:
+                    self.plan = None
+                    track = min(tracks, key=lambda t: abs(t.centroid_x+.36)+abs(t.centroid_y-.20))
                 self.node._fsm.target_id = track.id
                 self.node._fsm.state = 'TRACK'
                 self.node._maybe_request_inference(now)
@@ -246,42 +271,71 @@ class StaticOnce:
                 result = self.node._inference.latest(max_age=self.node._p['result_max_age'])
                 if result is not None and result.get('status') != 0:
                     self.node.get_logger().warning('Network has no usable grasp: '+str(result), throttle_duration_sec=5.)
-                if result is None or result.get('status') != 0 or abs(result['stamp']-track.stamp) > .3:
+                if not candidate_matches(result, track, stamp):
                     if self._motion_time()-self.started > self.infer_timeout:
                         self._abort('No valid fresh network grasp')
                     return
-                if self.plan is None:
-                    try:
-                        self.plan = self._make_plan(result, track)
-                    except ValueError as e:
-                        self.node.get_logger().warning('Rejected network candidate: '+str(e), throttle_duration_sec=5.)
-                        if self._motion_time()-self.started > self.infer_timeout:
-                            self._abort(str(e))
+                if self.planning_future is not None:
+                    if not self.planning_future.done():
                         return
+                    try:
+                        self.plan = self.planning_future.result()
+                    except ValueError as error:
+                        self.node.get_logger().warning('Rejected network candidate: '+str(error),
+                                                       throttle_duration_sec=5.)
+                        if self._motion_time()-self.started > self.infer_timeout:
+                            self._abort(str(error))
+                    finally:
+                        self.planning_future = None
+                    return  # Allow queued image/feedback callbacks before any execution.
+                if self.plan is not None:
+                    position, rotation = self._actual()
+                    if not stationary_plan_current(self.plan, track, result, stamp,
+                            self.arm.get_joint_state(), position, rotation, self.plan_max_age):
+                        self.plan = None
+                        self._set('STATIC_INFER')
+                if self.plan is None:
                     self.track = track
-                    self.node._publish_candidate(result)
-                    self._set('STATIC_READY')
-                if not self.node.get_parameter('execution_enabled').value:
+                    self.planning_future = self.static_planner.submit(self._make_plan, result, track)
                     return
-                if np.linalg.norm(np.array([track.centroid_x, track.centroid_y])-
-                                  [self.track.centroid_x, self.track.centroid_y]) > .008:
-                    self.plan = None
-                    self._set('STATIC_INFER')
+                self.node._publish_candidate(result)
+                if self.state != 'STATIC_READY':
+                    self._set('STATIC_READY')
+                if not self._execution_enabled():
                     return
                 if not self.enable.service_is_ready():
                     raise ValueError('Enable service unavailable')
                 request = SetBool.Request()
                 request.data = True
+                self.motion_issued = True
                 self.enable_future = self.enable.call_async(request)
                 self._set('STATIC_ENABLE')
             elif self.state == 'STATIC_ENABLE':
                 if self.enable_future.done():
+                    if not self._seed_current():
+                        raise ValueError('Arm moved after preflight')
                     if not self.enable_future.result().success:
                         raise ValueError('Arm enable failed')
                     self._grip(self.open_width, 'STATIC_OPEN')
                 elif self._motion_time()-self.started > 8:
                     raise ValueError('Enable timed out')
             elif self.state == 'STATIC_OPEN':
+                current = next((t for t in self.node._tracks if t.id == self.plan['track_id']), None)
+                # Continue inference while opening, then recheck the target and path seed.
+                self.node._fsm.state = 'TRACK'
+                self.node._maybe_request_inference(now)
+                if (current is None or current.status != 1 or not 0 <= stamp-current.stamp <= .2
+                        or np.linalg.norm(current.velocity) >= .015
+                        or np.linalg.norm(np.array([current.centroid_x, current.centroid_y, current.centroid_z])
+                                          -self.plan['track_center']) > .008
+                        or not self._seed_current()):
+                    raise ValueError('Target or arm changed while opening')
+                result = self.node._inference.latest(max_age=self.node._p['result_max_age'])
+                position, rotation = self._actual()
+                if self._motion_time()-self.started > 1 and not stationary_plan_current(
+                        self.plan, current, result, stamp, self.arm.get_joint_state(),
+                        position, rotation, self.plan_max_age+4.):
+                    raise ValueError('Network candidate or preflight changed while opening')
                 width = self.arm.get_gripper_width()
                 if self._motion_time()-self.started > 1 and width is not None and width >= self.plan['raw_width']+.002:
                     self._motion(self.plan['above'], 'STATIC_APPROACH', self.plan['joints'][0])
@@ -294,7 +348,7 @@ class StaticOnce:
             elif self.state == 'STATIC_CLOSE' and self._motion_time()-self.started > 1.5:
                 width = self.arm.get_gripper_width()
                 self.node.get_logger().info('STATIC_CLOSE width='+str(width))
-                if width is None or width <= self.plan['close_width']+.003:
+                if width is None or not np.isfinite(width) or width <= self.plan['close_width']+.003 or width >= self.open_width-.01:
                     self.failure = 'Empty grasp'
                     self._grip(self.open_width, 'STATIC_RECOVER_OPEN')
                 else:

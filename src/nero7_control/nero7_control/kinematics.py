@@ -32,6 +32,26 @@ class Kinematics:
             T = T @ origin @ A
         return T
 
+    def jacobian(self, q, tcp=None):
+        """Spatial geometric Jacobian at the flange or calibrated TCP."""
+        q = np.asarray(q, float)
+        if q.shape != (7,) or not np.isfinite(q).all():
+            raise ValueError('Jacobian requires seven finite joint angles')
+        T = np.eye(4)
+        axes, origins = [], []
+        for angle, (origin, axis) in zip(q, self.joints):
+            T = T@origin
+            axes.append(T[:3, :3]@axis)
+            origins.append(T[:3, 3].copy())
+            A = np.eye(4)
+            A[:3, :3] = Rotation.from_rotvec(axis*angle).as_matrix()
+            T = T@A
+        tip = T[:3, 3]
+        if tcp is not None:
+            tip = tip+T[:3, :3]@np.asarray(tcp, float)
+        axes, origins = np.asarray(axes), np.asarray(origins)
+        return np.vstack([np.cross(axes, tip-origins).T, axes.T])
+
     def solve(self, position, rotation, seed):
         def residual(q):
             T = self.fk(q)
@@ -56,5 +76,10 @@ def yaw_orientations(reference_rpy, axis_flange, yaw):
         rot = Rotation.from_euler('z', angle)*reference
         direction = rot.apply(axis)
         level = np.r_[direction[:2]/np.linalg.norm(direction[:2]), 0.]
-        correction, _ = Rotation.align_vectors([level], [direction])
+        # The one-vector SVD solution has an unconstrained twist in older
+        # SciPy versions. Use the unique minimum-angle tilt correction instead.
+        cross = np.cross(direction, level)
+        length = np.linalg.norm(cross)
+        correction = (Rotation.from_rotvec(cross/length*np.arctan2(length, direction@level))
+                      if length > 1e-12 else Rotation.identity())
         yield correction*rot

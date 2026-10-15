@@ -47,6 +47,13 @@ class ArmClient:
     def move_gripper(self, width_m, force=1.0, wait=False, timeout=3.0):
         raise NotImplementedError
 
+    def can_stream_joints(self):
+        """True only for an available, exclusive continuous-position endpoint."""
+        return False
+
+    def stream_joints(self, joints):
+        raise RuntimeError('Continuous joint targets are unavailable on this backend')
+
     def get_joint_state(self):
         """Latest 7 arm joint angles (rad), or None."""
         raise NotImplementedError
@@ -82,6 +89,7 @@ class RosTopicArmClient(ArmClient):
         self._pub_move_p = node.create_publisher(PoseStamped, p + 'control/move_p', 1)
         self._pub_move_l = node.create_publisher(PoseStamped, p + 'control/move_l', 1)
         self._pub_move_j = node.create_publisher(JointState, p + 'control/move_j', 1)
+        self._pub_move_js = node.create_publisher(JointState, p + 'control/move_js', 1)
         self._pub_joint = node.create_publisher(JointState, p + 'control/joint_states', 1)
         self._srv_enable = node.create_client(SetBool, p + 'enable_agx_arm')
         self._srv_home = node.create_client(Empty, p + 'move_home')
@@ -90,6 +98,8 @@ class RosTopicArmClient(ArmClient):
         self._joint_state = None
         self._gripper_width = None
         self._motion_done = True
+        self._motion_pending = False
+        self._motion_started = False
         node.create_subscription(JointState, p + 'feedback/joint_states',
                                  self._joint_cb, 5)
         try:
@@ -108,7 +118,19 @@ class RosTopicArmClient(ArmClient):
         self._joint_state = list(msg.position)
 
     def _status_cb(self, msg):
-        self._motion_done = (msg.motion_status == 0)
+        if self._motion_pending:
+            if msg.motion_status != 0:
+                self._motion_started = True
+            elif self._motion_started:
+                self._motion_pending = False
+            self._motion_done = not self._motion_pending
+        else:
+            self._motion_done = (msg.motion_status == 0)
+
+    def _motion_commanded(self):
+        self._motion_pending = True
+        self._motion_started = False
+        self._motion_done = False
 
     def _gripper_cb(self, msg):
         self._gripper_width = msg.width
@@ -141,16 +163,17 @@ class RosTopicArmClient(ArmClient):
             time.sleep(0.02)
 
     def enable(self):
-        while not self._srv_enable.wait_for_service(timeout_sec=2.0):
-            self._node.get_logger().info('waiting for /enable_agx_arm ...')
+        if not self._srv_enable.service_is_ready():
+            raise RuntimeError('Arm enable service unavailable')
         req = SetBool.Request()
         req.data = True
-        self._srv_enable.call_async(req)
+        return self._srv_enable.call_async(req)
 
     def home(self):
-        while not self._srv_home.wait_for_service(timeout_sec=2.0):
-            self._node.get_logger().info('waiting for /move_home ...')
-        self._srv_home.call_async(Empty.Request())
+        if not self._srv_home.service_is_ready():
+            raise RuntimeError('Arm home service unavailable')
+        self._motion_commanded()
+        return self._srv_home.call_async(Empty.Request())
 
     def estop(self):
         # A fault/shutdown handler must never wait indefinitely for a dead driver.
@@ -159,6 +182,7 @@ class RosTopicArmClient(ArmClient):
         self._node.get_logger().error('Emergency stop service unavailable')
 
     def move_p(self, pose, wait=False, timeout=5.0):
+        self._motion_commanded()
         self._pub_move_p.publish(self._pose_msg(pose))
         if wait:
             self._wait(timeout)
@@ -170,11 +194,13 @@ class RosTopicArmClient(ArmClient):
         msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = pose[:3]
         msg.pose.orientation.x, msg.pose.orientation.y = pose[3], pose[4]
         msg.pose.orientation.z, msg.pose.orientation.w = pose[5], pose[6]
+        self._motion_commanded()
         self._pub_move_p.publish(msg)
         if wait:
             self._wait(timeout)
 
     def move_l(self, pose, wait=False, timeout=5.0):
+        self._motion_commanded()
         self._pub_move_l.publish(self._pose_msg(pose))
         if wait:
             self._wait(timeout)
@@ -183,6 +209,7 @@ class RosTopicArmClient(ArmClient):
         msg = JointState()
         msg.name = [f'joint{i}' for i in range(1, len(joints) + 1)]
         msg.position = list(map(float, joints))
+        self._motion_commanded()
         self._pub_move_j.publish(msg)
         if wait:
             self._wait(timeout)
@@ -195,6 +222,24 @@ class RosTopicArmClient(ArmClient):
         self._pub_joint.publish(msg)
         if wait:
             time.sleep(timeout if timeout < 1.0 else 1.0)
+
+    def can_stream_joints(self):
+        # An absent/ambiguous driver or another stream publisher blocks this mode.
+        return (self._pub_move_js.get_subscription_count() == 1
+                and self._node.count_publishers(self._pub_move_js.topic_name) == 1)
+
+    def stream_joints(self, joints):
+        joints = list(map(float, joints))
+        if len(joints) != 7 or not all(math.isfinite(q) for q in joints):
+            raise ValueError('Stream requires seven finite joint targets')
+        if not self.can_stream_joints():
+            raise RuntimeError('Exclusive /control/move_js endpoint unavailable')
+        msg = JointState()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.name = [f'joint{i}' for i in range(1, 8)]
+        msg.position = joints
+        # AGX move_js consumes positions; JointState.velocity is not a servo API.
+        self._pub_move_js.publish(msg)
 
     def _pose_msg(self, pose):
         msg = PoseStamped()

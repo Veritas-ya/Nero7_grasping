@@ -1,0 +1,38 @@
+# Load this with mode:=conveyor_follow. Preview sends no enable/arm/gripper commands.
+# Bounds are TCP XY in base_link (m), followed by additional URDF reach/path checks.
+# Replace the coarse workspace box with the measured usable conveyor region on site.
+grasp_controller:
+  ros__parameters:
+    backend: ros_topic
+    dry_run: false
+    fsm_rate: 50.0
+    infer_tf_timeout: 0.0
+    visualization_enabled: false
+    follow_region: [-0.45, 0.45, -0.35, 0.35]
+    follow_region_margin: 0.02
+    follow_prepare_seconds: 1.5
+    follow_approach_seconds: 2.0
+    follow_planning_reserve: 2.5
+    follow_sync_timeout: 1.5
+    follow_descend_seconds: 2.5
+    follow_close_timeout: 1.2
+    follow_lift_seconds: 2.5
+    follow_brake_seconds: 0.6
+    follow_approach_height: 0.08
+    follow_lift_height: 0.10
+    # Estimated transport/actuator delay; measure it for the installed driver.
+    follow_command_latency: 0.03
+    # Only AFTER verified synchronization/descent and the close command.
+    follow_close_occlusion: 0.35
+    follow_speed_min: 0.008
+    follow_speed_max: 0.04
+    follow_velocity_tolerance: 0.008
+    follow_position_tolerance: 0.016
+    follow_cross_tolerance: 0.012
+    follow_confidence_sigma: 3.0
+    follow_position_gain: 4.0
+    # move_js has no internal smoothing; these limits apply to every stream sample.
+    follow_joint_speed: 0.6
+    follow_joint_accel: 2.0
+    follow_linear_speed: 0.10
+    follow_angular_speed: 0.3

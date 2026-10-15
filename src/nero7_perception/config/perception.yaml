@@ -24,6 +24,13 @@ block_detector:
     plane_calibration_max_points: 5000
     plane_ransac_distance: 0.006
     plane_ransac_min_ratio: 0.4   # 原算法基准；新三维标定使用 base_plane_min_ratio
+    plane_ransac_max_points: 5000
+    processing_rate_hz: 30.0  # 定时处理最新配对帧；相机回调仅入队
+    debug_rate_hz: 10.0
+    debug_max_width: 0  # 保留相机原始分辨率；需要降采样时显式设置宽度
+    tracker_reacquire_samples: 3
+    tracker_reacquire_max_distance: 0.02
+    tracker_reacquire_consistency: 0.006
     plane_refresh_every: 10     # 仅 legacy_depth 实时重拟合
     base_plane_min_ratio: 0.7
     plane_max_tilt_rad: 0.01
@@ -80,18 +87,18 @@ block_detector:
     camera_optical_frame: "camera_color_optical_frame"
     
     # 外部标定与传送带参数文件位置 (可选)
-    belt_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml"
-    calibration_file: "/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml"
+    belt_file: ""  # 自动从源码相邻包或已安装 nero7_bringup 查找
+    calibration_file: ""
 
     # ---------------- 多目标追踪器 (BlockTracker) 参数 ----------------
     tracker_max_vel: 0.15          # 最大容许预测速度 (m/s)
     tracker_gate_radius: 0.03      # 匹配前后帧物体的最大距离门限 (3 cm)
     tracker_confirm_frames: 2      # 连续检测到多少帧后将状态标记为已确认 (CONFIRMED)
-    tracker_lost_frames: 6         # 短暂遮挡时保留 ID；超过这个丢帧数删除
+    tracker_lost_frames: 6         # 未确认目标的丢帧上限；已确认 ID 按 lost_timeout 到期
     tracker_lost_timeout: 0.5      # 距最后有效观测的绝对超时 (秒)，包括相机长间断
 
     # XY 匀速卡尔曼滤波：速度来自实测 RGB-D 位置，不使用给定带速
-    speed_window_s: 0.6            # 速度有效性所需的近期有效观测窗口 (秒)
+    speed_window_s: 1.2            # 速度有效性所需的近期有效观测窗口 (秒)
     speed_min_samples: 8           # 不能把同一帧/预测位置计为新观测
     speed_min_span: 0.3            # 有效观测至少覆盖的时间 (秒)
     kalman_measurement_std: 0.002  # 每轴位置测量噪声标准差 (m)，不是精度保证

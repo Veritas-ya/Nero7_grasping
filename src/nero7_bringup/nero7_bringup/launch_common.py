@@ -29,28 +29,14 @@ def calibrated_camera_root_transform(data):
 
 
 def load_calibration(path):
-    """Return base->camera_link, converting optical calibration when specified."""
-    t = [0.0, 0.0, 0.0]
-    q = [1.0, 0.0, 0.0, 0.0]  # w, x, y, z
-    try:
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        if data and 'camera_in_base' in data:
-            t = data['camera_in_base']['translation']
-            q = data['camera_in_base']['quaternion']
-            if data.get('camera_frame') == 'camera_color_optical_frame':
-                # T_base_link = T_base_optical @ inverse(T_link_optical).
-                fixed = data['camera_link_to_color_optical']
-                fq = fixed['quaternion']  # wxyz
-                base_optical = Rotation.from_quat([q[1], q[2], q[3], q[0]])
-                link_optical = Rotation.from_quat([fq[1], fq[2], fq[3], fq[0]])
-                base_link = base_optical * link_optical.inv()
-                t = np.asarray(t) - base_link.apply(fixed['translation'])
-                x, y, z, w = base_link.as_quat()
-                q = [w, x, y, z]
-    except (OSError, KeyError, TypeError):
-        pass
-    return [t[0], t[1], t[2], q[1], q[2], q[3], q[0]]
+    """Load a validated optical calibration; missing data must fail startup."""
+    with open(path) as stream:
+        data = yaml.safe_load(stream)
+    if not isinstance(data, dict):
+        raise ValueError('Calibration must be a YAML mapping')
+    transform = calibrated_camera_root_transform(data)
+    quaternion = Rotation.from_matrix(transform[:3, :3]).as_quat()
+    return [*transform[:3, 3].tolist(), *quaternion.tolist()]
 
 
 def camera_static_tf_opaque(context):

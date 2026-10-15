@@ -184,12 +184,13 @@ class KalmanTrackerTest(unittest.TestCase):
         self.assertIsNone(tracker.tracks[0].speed)
         self.assertEqual(tracker.update([], stamp + .51), [])
 
-    def test_frame_count_expiry_and_gap_expiry(self):
+    def test_confirmed_id_uses_elapsed_time_and_gap_expiry(self):
         tracker = self.fitted_tracker(lost_frames=3)
         stamp = tracker.tracks[0].stamp
         for i in range(1, 4):
             self.assertEqual(len(tracker.update([], stamp + i / 30.)), 1)
-        self.assertEqual(tracker.update([], stamp + 4 / 30.), [])
+        self.assertEqual(len(tracker.update([], stamp + 4 / 30.)), 1)
+        self.assertEqual(tracker.update([], stamp + .51), [])
         tracker = self.fitted_tracker()
         old_id = tracker.tracks[0].id
         raw = tracker.tracks[0].observed_centroid[:2].copy()

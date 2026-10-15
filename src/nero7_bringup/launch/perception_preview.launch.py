@@ -39,6 +39,9 @@ def start(context):
         parameters=[dict(params_file=arg('perception_params'), detection_mode=arg('detection_mode'),
             plane_mode=arg('plane_mode'), plane_file=arg('plane_file'),
             plane_calibration_enabled=arg('empty_belt_calibration') == 'true',
+            debug_max_width=int(arg('debug_max_width')),
+            legacy_rgb_components=arg('legacy_rgb_components') == 'true',
+            tracker_lost_timeout=float(arg('tracker_lost_timeout')),
             roi_px=roi, plane_roi_px=plane_roi, calibration_file=arg('calibration_file'))]))
     if arg('visualize') == 'true':
         if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
@@ -53,7 +56,9 @@ def start(context):
 def generate_launch_description():
     bringup = Path(get_package_share_directory('nero7_bringup'))
     perception = Path(get_package_share_directory('nero7_perception'))
-    defaults = dict(start_camera='false', publish_camera_tf='false', visualize='true',
+    defaults = dict(start_camera='false', publish_camera_tf='false', visualize='true', debug_max_width='0',
+        legacy_rgb_components='false',
+        tracker_lost_timeout='0.5',
         detection_mode='rgb_depth', plane_mode='fixed', plane_file='/tmp/nero7_belt_plane.yaml',
         empty_belt_calibration='false', roi_px='[0,0,0,0]', plane_roi_px='[0,0,0,0]',
         perception_params=str(perception/'config/perception.yaml'),

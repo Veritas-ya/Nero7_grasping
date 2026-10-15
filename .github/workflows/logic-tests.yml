@@ -1,0 +1,82 @@
+name: Logic regression tests
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pure-logic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src/nero7_control:src/nero7_perception:src/nero7_bringup
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install test dependencies
+        run: python -m pip install numpy scipy opencv-python-headless pyyaml pytest
+      - name: Compile all project Python sources
+        run: python -m compileall -q src
+      - name: Run hardware independent regressions
+        run: >-
+          python -m pytest -q
+          src/nero7_bringup/test/test_camera_tf.py
+          tests/test_controller_boundaries.py
+          tests/test_follow_boundaries.py
+          src/nero7_control/test/test_follow_math.py
+          src/nero7_control/test/test_fsm_regressions.py
+          src/nero7_control/test/test_plan_validity.py
+          src/nero7_control/test/test_conveyor_prediction.py
+          src/nero7_control/test/test_kalman_control.py
+          src/nero7_perception/test/test_tracking_regressions.py
+          src/nero7_perception/test/test_legacy_components.py
+          src/nero7_perception/test/test_kalman_motion.py
+          src/nero7_perception/test/test_visual_speed.py
+          src/nero7_perception/test/test_depth_center.py
+          src/nero7_perception/test/test_debug_overlay_regressions.py
+      - name: Compare synthetic plane-fitting performance
+        run: python scripts/benchmark_perception.py
+
+  ros-humble:
+    runs-on: ubuntu-latest
+    container: ros:humble-ros-base-jammy
+    timeout-minutes: 20
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Humble integration dependencies
+        shell: bash
+        run: |
+          apt-get update
+          apt-get install -y python3-pytest python3-numpy python3-scipy python3-opencv python3-yaml python3-skimage ros-humble-cv-bridge ros-humble-tf2-ros ros-humble-tf2-geometry-msgs ros-humble-robot-state-publisher ros-humble-rqt-image-view
+      - name: Build actual packages with explicit CI driver message doubles
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          python3 tests/create_ros_message_fixture.py --output-dir /tmp/nero7_ci_interfaces
+          colcon build --base-paths src/nero7_msgs src/nero7_perception src/nero7_control src/nero7_bringup /tmp/nero7_ci_interfaces --event-handlers console_direct+
+      - name: Exercise real ROS nodes and generated message contracts
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          source install/setup.bash
+          python3 -m pytest -q -p tests.ros_network_stub \
+            tests/test_ros_startup.py \
+            tests/test_follow_ros.py \
+            src/nero7_bringup/test/test_camera_tf.py \
+            src/nero7_control/test/test_controller_shutdown.py \
+            src/nero7_control/test/test_conveyor_scheduler.py \
+            src/nero7_control/test/test_conveyor_transport.py \
+            src/nero7_control/test/test_visualization.py \
+            src/nero7_perception/test/test_base_perception.py \
+            src/nero7_perception/test/test_speed_overlay.py

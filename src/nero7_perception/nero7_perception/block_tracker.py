@@ -1,5 +1,6 @@
 """Multi-object image tracking with timestamped XY Kalman motion estimates."""
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from .kalman_motion import KalmanMotion
 
@@ -19,6 +20,9 @@ class Track:
         config.setdefault('belt_direction', self._belt_direction)
         self.motion = KalmanMotion(np.asarray(det['centroid_base'], float)[:2], t,
                                    **config)
+        self._motion_config = config
+        self.reacquisitions = 0
+        self._reacquire = []
         self._confirm_frames = confirm_frames
         self.hits = 1
         self.misses = 0
@@ -81,9 +85,42 @@ class Track:
             self._sync_motion()
             return False
         self._set_observation(det, t)
+        self._reacquire.clear()
         self.hits += 1
         self.misses = 0
         self.confirmed = self.hits >= self._confirm_frames
+        self._sync_motion()
+        return True
+
+    def reacquire(self, det, t, samples, max_distance, consistency):
+        """Reacquire a unique neighboring object; reset speed qualification."""
+        point = np.asarray(det['centroid_base'], float)
+        residual = point[:2]-self.centroid[:2]
+        if np.linalg.norm(residual) > max_distance:
+            self._reacquire.clear()
+            return False
+        if self._reacquire and (t-self._reacquire[-1][0] > .3
+                or np.linalg.norm(residual-self._reacquire[-1][2]) > consistency):
+            self._reacquire.clear()
+        self._reacquire.append((float(t), det, residual))
+        self._reacquire = self._reacquire[-samples:]
+        if len(self._reacquire) < samples or np.max(np.linalg.norm(
+                np.array([entry[2] for entry in self._reacquire])-residual, axis=1)) > consistency:
+            return False
+        first_time, first, _ = self._reacquire[0]
+        motion = KalmanMotion(np.asarray(first['centroid_base'], float)[:2],
+                              first_time, **self._motion_config)
+        for stamp, observation, _ in self._reacquire[1:]:
+            if not motion.update(np.asarray(observation['centroid_base'], float)[:2], stamp):
+                self._reacquire.clear()
+                return False
+        self.motion = motion
+        self._set_observation(det, t)
+        self.misses = 0
+        self.hits += samples
+        self.confirmed = self.hits >= self._confirm_frames
+        self.reacquisitions += 1
+        self._reacquire.clear()
         self._sync_motion()
         return True
 
@@ -95,7 +132,8 @@ class Track:
 class BlockTracker:
     def __init__(self, belt_model, speed_cfg, max_vel=0.15, gate_radius=0.03,
                  confirm_frames=2, lost_frames=6, motion_cfg=None,
-                 lost_timeout=0.5):
+                 lost_timeout=0.5, reacquire_samples=3,
+                 reacquire_max_distance=.02, reacquire_consistency=.006):
         self.belt = belt_model
         self.speed_cfg = speed_cfg
         self.motion_cfg = dict(motion_cfg or {})
@@ -105,6 +143,12 @@ class BlockTracker:
         self.confirm_frames = confirm_frames
         self.lost_frames = lost_frames
         self.lost_timeout = lost_timeout
+        if (reacquire_samples < 3 or reacquire_max_distance <= 0 or reacquire_consistency <= 0
+                or lost_timeout <= 0):
+            raise ValueError('Invalid tracking/reacquisition bounds')
+        self.reacquire_samples = int(reacquire_samples)
+        self.reacquire_max_distance = float(reacquire_max_distance)
+        self.reacquire_consistency = float(reacquire_consistency)
         self.tracks = []
         self._next_id = 0
         self._last_t = None
@@ -122,7 +166,7 @@ class BlockTracker:
         self._last_t = t
         self.tracks = [tr for tr in self.tracks
                        if t - tr.stamp <= self.lost_timeout
-                       and tr.misses <= self.lost_frames]
+                       and (tr.confirmed or tr.misses <= self.lost_frames)]
         for tr in self.tracks:
             tr.predict(t)
 
@@ -133,7 +177,7 @@ class BlockTracker:
                 valid_detections.append(detection)
 
         candidates = []
-        near_existing = set()
+        neighbors = {}
         for track_index, tr in enumerate(self.tracks):
             # Statistical uncertainty gates association, with a physical
             # limit to prevent a very uncertain ID jumping to another object.
@@ -143,33 +187,68 @@ class BlockTracker:
                     np.asarray(detection['centroid_base'], float)[:2], t)
                 if innovation is None or innovation[1] > physical_gate:
                     continue
-                near_existing.add(detection_index)
+                neighbors.setdefault(detection_index, []).append(track_index)
                 if innovation[0] <= tr.motion.innovation_gate:
                     candidates.append((innovation[0], innovation[1],
                                        track_index, detection_index))
 
         matched_tracks, matched_detections = set(), set()
-        for _, _, track_index, detection_index in sorted(candidates):
-            if track_index in matched_tracks or detection_index in matched_detections:
+        if candidates:
+            # Prefer retaining the largest set of existing IDs, then minimize
+            # total innovation. A locally nearest pair may otherwise strand
+            # another track that has only that one valid observation.
+            n_tracks, n_detections = len(self.tracks), len(valid_detections)
+            unmatched_cost = n_tracks+n_detections+1.
+            costs = np.full((n_tracks, n_detections+n_tracks), unmatched_cost)
+            costs[:, :n_detections] = np.inf
+            for distance_sq, distance, track_index, detection_index in candidates:
+                gate = self.tracks[track_index].motion.innovation_gate
+                physical_gate = self.gate_radius+self.max_vel*(t-self.tracks[track_index].stamp)
+                costs[track_index, detection_index] = distance_sq/gate+1e-6*distance/physical_gate
+            rows, columns = linear_sum_assignment(costs)
+            for track_index, detection_index in zip(rows, columns):
+                if detection_index >= n_detections:
+                    continue
+                if self.tracks[track_index].update(valid_detections[detection_index], t):
+                    matched_tracks.add(track_index)
+                    matched_detections.add(detection_index)
+
+        suppressed = set()
+        for detection_index, close_tracks in neighbors.items():
+            if detection_index in matched_detections:
                 continue
-            if self.tracks[track_index].update(valid_detections[detection_index], t):
+            unmatched = [index for index in close_tracks if index not in matched_tracks]
+            if not unmatched:
+                continue  # A second object beside a matched track needs its own ID.
+            suppressed.add(detection_index)
+            if len(close_tracks) != 1 or len(unmatched) != 1:
+                continue
+            track_index = unmatched[0]
+            near_detections = [di for di, indices in neighbors.items() if track_index in indices]
+            if len(near_detections) != 1:
+                continue
+            tr = self.tracks[track_index]
+            if tr.reacquire(valid_detections[detection_index], t, self.reacquire_samples,
+                            self.reacquire_max_distance, self.reacquire_consistency):
                 matched_tracks.add(track_index)
                 matched_detections.add(detection_index)
 
         for track_index, tr in enumerate(self.tracks):
             if track_index not in matched_tracks:
                 tr.mark_missed()
+            elif tr.misses == 0:
+                tr._reacquire.clear()
         for detection_index, detection in enumerate(valid_detections):
             if detection_index in matched_detections:
                 continue
             # A statistically rejected jump adjacent to an existing object
             # cannot create a duplicate, newly confirmed ID.
-            if detection_index in near_existing:
+            if detection_index in suppressed:
                 continue
             self.tracks.append(Track(self._next_id, detection, t, self.speed_cfg,
                                      self.belt.d_hat, self.motion_cfg,
                                      self.confirm_frames))
             self._next_id += 1
 
-        self.tracks = [tr for tr in self.tracks if tr.misses <= self.lost_frames]
+        self.tracks = [tr for tr in self.tracks if tr.confirmed or tr.misses <= self.lost_frames]
         return self.tracks

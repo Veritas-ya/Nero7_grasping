@@ -72,7 +72,7 @@ class AlignedTopicSource(DepthSource):
         super().__init__(node, buffer_size, on_update)
         self._bridge = CvBridge()
         self._camera, self._rectified = None, rectified
-        qos = QoSProfile(depth=buffer_size)
+        qos = QoSProfile(depth=1)
         if reliability == 'best_effort':
             qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self._sub = node.create_subscription(Image, topic, self._cb, qos)
@@ -127,7 +127,7 @@ class PointsSource(DepthSource):
         self._target_frame, self._rectified = target_frame, rectified
         self._camera = None
         self._min_dt, self._last_t = 1. / max_rate, -np.inf
-        qos = QoSProfile(depth=buffer_size)
+        qos = QoSProfile(depth=1)
         if reliability == 'best_effort':
             qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self._sub_points = node.create_subscription(PointCloud2, points_topic, self._cloud_cb, qos)

@@ -13,7 +13,10 @@ import numpy as np
 class BeltPlane:
     """RANSAC plane fit in (u, v, z) depth space."""
 
-    def __init__(self, distance=0.006, min_ratio=0.4, max_iter=100, rng_seed=1):
+    def __init__(self, distance=0.006, min_ratio=0.4, max_iter=100, rng_seed=1, max_points=5000):
+        if max_points < 100 or max_iter < 1:
+            raise ValueError('Plane fitting needs >=100 samples and >=1 iteration')
+        self.max_points = int(max_points)
         self.distance = distance
         self.min_ratio = min_ratio
         self.max_iter = max_iter
@@ -45,28 +48,44 @@ class BeltPlane:
             self.coeffs = self.last_good
             return self.coeffs is not None
 
-        # downsample for speed (max ~30k samples)
-        if zs.size > 30000:
-            idx = self.rng.choice(zs.size, 30000, replace=False)
+        # Bound work, and avoid threaded BLAS for a tiny three-column product.
+        if zs.size > self.max_points:
+            idx = self.rng.choice(zs.size, self.max_points, replace=False)
             us, vs, zs = us[idx], vs[idx], zs[idx]
 
         A = np.column_stack([us, vs, np.ones_like(us)])
         best = None
         best_inliers = 0
-        for _ in range(self.max_iter):
+        required_iterations = self.max_iter
+        best_mask = None
+        for iteration in range(self.max_iter):
             idx = self.rng.choice(zs.size, 3, replace=False)
+            if abs(np.linalg.det(A[idx])) < 1e-8:
+                continue
             try:
                 coeffs, *_ = np.linalg.lstsq(A[idx], zs[idx], rcond=None)
             except np.linalg.LinAlgError:
                 continue
-            resid = np.abs(A @ coeffs - zs)
-            n_in = int(np.count_nonzero(resid < self.distance))
+            resid = np.abs(us*coeffs[0]+vs*coeffs[1]+coeffs[2]-zs)
+            mask = resid < self.distance
+            n_in = int(mask.sum())
             if n_in > best_inliers:
                 best_inliers = n_in
                 best = coeffs
+                best_mask = mask
+                success = min((n_in/zs.size)**3, 1.-1e-12)
+                required_iterations = max(10, int(np.ceil(np.log(.001)/np.log1p(-success))))
+            if iteration+1 >= required_iterations:
+                break
         if best is None or best_inliers < self.min_ratio * zs.size:
             self.coeffs = self.last_good
             return self.coeffs is not None
+        for _ in range(2):
+            best, *_ = np.linalg.lstsq(A[best_mask], zs[best_mask], rcond=None)
+            best_mask = np.abs(us*best[0]+vs*best[1]+best[2]-zs) < self.distance
+            if best_mask.sum() < max(100, self.min_ratio*zs.size):
+                self.coeffs = self.last_good
+                return self.coeffs is not None
         self.coeffs = best
         self.last_good = best
         return True

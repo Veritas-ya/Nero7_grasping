@@ -5,6 +5,10 @@
 抓取热力图）生成；带速由纯视觉跟踪估计；动态抓取采用"抓取闸门"策略
 （预测到达时间 + 提前量触发下降 + 相机确认）。
 
+控制逻辑与感知延迟、测速和 ID 稳定性修复及现场复测方法见
+[logic_and_tracking_fixes.md](logic_and_tracking_fixes.md)。正式模式均默认执行关闭；
+显式 execution_enabled=true 且 dry_run=false 才会发送运动与夹爪命令。
+
 ## 包结构
 
 | 包 | 内容 |
@@ -21,6 +25,9 @@ Gazebo 示例的启动、真机参数对应关系及验证方法见
 视觉感知改进的[代码审查](perception_review.md)、[实现与实验报告](perception_improvement_report.md)
 和[只读采集/验证方法](perception_validation.md)已提供。新模式包括基座系固定高度、
 三维平面和 RGB/深度融合；默认保留 legacy_depth 对照，新模式需先校核空带标定文件。
+
+当前现场使用的原尺寸测速画面、稳定 ID 配置及启动命令见
+[camera_speed_preview.md](camera_speed_preview.md)。
 
 ## 依赖（已就绪的机器环境）
 
@@ -130,7 +137,8 @@ ros2 run nero7_control grasp_controller --ros-args \
 下面是原有整套系统启动方式（默认连续传送带模式）：
 
 ```bash
-ros2 launch nero7_bringup bringup.launch.py
+ros2 launch nero7_bringup bringup.launch.py execution_enabled:=false
+# 连续执行需先填写有效 bin_pre_joints/bin_drop_pose，再显式 execution_enabled:=true
 # 抓取任务会自动打开 /perception/debug_image 图像窗口；状态见 /grasp/state
 # 模型 A/B 对比（物块摆好后运行，Ctrl+C 出统计，图存 /tmp/grasp_benchmark）
 ros2 run nero7_control benchmark_models
@@ -144,7 +152,7 @@ ros2 run nero7_control benchmark_models
 持续更新位置、速度及协方差。传送带速度来自物体的视觉轨迹，无需输入电机
 设定速度。速度沿 `belt.yaml` 中的带方向投影，单位 m/s。
 
-默认要求最近 0.6 秒内至少 8 次有效观测，跨度至少 0.3 秒，速度标准差
+默认要求最近 1.2 秒内至少 8 次有效观测，跨度至少 0.3 秒，速度标准差
 不超过 0.010 m/s，最后观测不超过 0.15 秒。异常位置通过创新门限拒绝，
 重复时间戳不增加观测数。短时丢失仅作预测，保持最后观测时间戳并增大
 协方差；丢失超过新鲜度门限后 `speed_valid=false`。无效速度发布 0，
@@ -248,11 +256,11 @@ ros2 param set /grasp_controller k_lead 0.08
 ## 干跑模式
 
 ```bash
-ros2 launch nero7_bringup dry_run.launch.py   # 夹爪不闭合、臂速 25%
+ros2 launch nero7_bringup dry_run.launch.py   # 只读预览，不发送运动/夹爪命令
 ```
 
-这个旧 launch 会运动，不能作为“不发指令”的预览。`conveyor_once` 的
-`execution_enabled=false` 或 `dry_run=true` 才阻止该模式全部运动和夹爪指令。
+`execution_enabled=false` 或 `dry_run=true` 在所有正式模式下都阻止运动和夹爪指令；
+执行途中关闭执行开关会请求停止。首次执行前请核对现场标定与示教配置。
 
 ## 安全要点
 

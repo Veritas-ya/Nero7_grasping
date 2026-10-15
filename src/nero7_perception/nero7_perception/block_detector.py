@@ -20,11 +20,12 @@ from .alignment import make_depth_source
 from .geometry import CameraGeometry, check_transform
 from .base_plane import (EmptyBeltCalibration, load_plane, save_plane,
                          plane_context, check_plane_context, archive_plane)
-from .detection import (DETECTION_DEFAULTS, validate_detection_config, calibration_points,
+from .detection import (DETECTION_DEFAULTS, validate_detection_config, resolve_detection_paths, calibration_points,
                         detect_blocks, detect_legacy)
 from .conveyor_model import BeltPlane, BeltModel
 from .block_tracker import BlockTracker
 from .speed_overlay import draw_speed_overlay
+from .frame_selection import newest_pair
 
 
 class BlockDetectorNode(Node):
@@ -48,6 +49,13 @@ class BlockDetectorNode(Node):
             ('plane_ransac_distance', 0.006),
             ('plane_ransac_min_ratio', 0.4),
             ('plane_refresh_every', 10),
+            ('plane_ransac_max_points', 5000),
+            ('processing_rate_hz', 30.0),
+            ('debug_rate_hz', 10.0),
+            ('debug_max_width', 0),
+            ('tracker_reacquire_samples', 3),
+            ('tracker_reacquire_max_distance', .02),
+            ('tracker_reacquire_consistency', .006),
             ('block_height_min', 0.008),
             ('block_height_max', 0.060),
             ('min_area_px', 300),
@@ -56,7 +64,7 @@ class BlockDetectorNode(Node):
             ('tracker_confirm_frames', 2),
             ('tracker_lost_frames', 6),
             ('tracker_lost_timeout', 0.5),
-            ('speed_window_s', 0.6),
+            ('speed_window_s', 1.2),
             ('speed_min_samples', 8),
             ('speed_min_span', 0.3),
             ('speed_resid_std_max', 0.008),
@@ -76,18 +84,26 @@ class BlockDetectorNode(Node):
             ('camera_optical_frame', 'camera_color_optical_frame'),
             ('publish_debug', True),
             ('debug_topic', '/perception/debug_image'),
-            ('belt_file', '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml'),
-            ('calibration_file', '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml'),
+            ('belt_file', ''),
+            ('calibration_file', ''),
         ] + list(DETECTION_DEFAULTS.items()):
-            params[name] = self.declare_parameter(name, file_params.get(name, default)).value
+            value = file_params.get(name, default)
+            if name in ('belt_file', 'calibration_file') and not value:
+                value = resolve_detection_paths(file_params, p or None)[name]
+            params[name] = self.declare_parameter(name, value).value
 
+        params = resolve_detection_paths(params, p or None)
         validate_detection_config(params)
+        if (not np.isfinite([params['processing_rate_hz'], params['debug_rate_hz']]).all()
+                or params['processing_rate_hz'] <= 0 or params['debug_rate_hz'] <= 0
+                or params['debug_max_width'] < 0):
+            raise ValueError('Invalid processing/debug rate or debug width')
         self._p = params
         self._bridge = CvBridge()
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
-        qos = QoSProfile(depth=5)
+        qos = QoSProfile(depth=1)
         if params['qos_reliability'] == 'best_effort':
             qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
@@ -98,21 +114,20 @@ class BlockDetectorNode(Node):
         self._last_depth_stamp = -np.inf
         self._last_color_stamp = -np.inf
         self._processing = False
-        self._diagnostics = dict(processed_frames=0, rejected_frames=0)
+        self._diagnostics = dict(processed_frames=0, rejected_frames=0, backlog_frames_dropped=0,
+                                 color_frames_received=0, debug_frames_published=0)
+        self._last_debug_time = -np.inf
         self.create_subscription(Image, params['color_topic'], self._color_cb, qos)
         self._info_sub = self.create_subscription(CameraInfo, params['color_camera_info'], self._info_cb, qos)
         self._K = None
 
-        self._depth_source = make_depth_source(self, params, on_update=self._process)
+        self._depth_source = make_depth_source(self, params)
 
         # Belt model setup
         belt = {}
         if params['belt_file']:
-            try:
-                with open(params['belt_file']) as f:
-                    belt = yaml.safe_load(f) or {}
-            except OSError as e:
-                self.get_logger().warn(f'cannot read belt file: {e}')
+            with open(params['belt_file']) as f:
+                belt = yaml.safe_load(f) or {}
         self._belt = BeltModel.from_yaml(belt)
 
         # Depth-to-Color (d2c) pixel offset registration
@@ -133,7 +148,7 @@ class BlockDetectorNode(Node):
                         z=params.get('workspace_z', [-0.25, 0.15]))
 
         self._plane = BeltPlane(distance=params['plane_ransac_distance'],
-                                min_ratio=params['plane_ransac_min_ratio'])
+                                min_ratio=params['plane_ransac_min_ratio'], max_points=params['plane_ransac_max_points'])
         self._frame_count = 0
         roi = params['roi_px']
         self._roi = tuple(roi) if any(roi) else None
@@ -174,6 +189,9 @@ class BlockDetectorNode(Node):
             confirm_frames=params['tracker_confirm_frames'],
             lost_frames=params.get('tracker_lost_frames', 6),
             lost_timeout=params.get('tracker_lost_timeout', 0.5),
+            reacquire_samples=params['tracker_reacquire_samples'],
+            reacquire_max_distance=params['tracker_reacquire_max_distance'],
+            reacquire_consistency=params['tracker_reacquire_consistency'],
             motion_cfg=dict(
                 measurement_std=params.get('kalman_measurement_std', 0.002),
                 accel_noise_std=params.get('kalman_accel_noise_std', 0.002),
@@ -189,6 +207,7 @@ class BlockDetectorNode(Node):
         if params['publish_debug']:
             self._pub_debug = self.create_publisher(Image, params['debug_topic'], 5)
 
+        self._processing_timer = self.create_timer(1./params['processing_rate_hz'], self._process)
         self._status_timer = self.create_timer(2.0, self._status_cb)
         self._pub_diagnostics = self.create_publisher(String, '/perception/diagnostics', 5)
         self._started_monotonic = time.perf_counter()
@@ -203,7 +222,7 @@ class BlockDetectorNode(Node):
             return
         image = self._bridge.imgmsg_to_cv2(msg, 'bgr8')
         self._colors.append((image, msg.header.stamp, msg.header.frame_id))
-        self._process()
+        self._diagnostics['color_frames_received'] += 1
 
     def _info_cb(self, msg):
         try:
@@ -216,7 +235,6 @@ class BlockDetectorNode(Node):
                     or (old.width, old.height, old.frame_id) != (camera.width, camera.height, camera.frame_id)):
                 self._camera = camera
             self._K = camera.K
-            self._process()
         except ValueError as error:
             self._camera = None
             self.get_logger().warning(str(error), throttle_duration_sec=2.)
@@ -234,6 +252,17 @@ class BlockDetectorNode(Node):
         self._status_last_time, self._status_last_processed = now, processed
         if self._base_plane is not None:
             report.update(plane_normal_base=self._base_plane.normal.tolist(), plane_offset_m=self._base_plane.offset)
+        report['track_created_total'] = self._tracker._next_id
+        report['speed_window_s'] = self._p['speed_window_s']
+        report['tracks_detail'] = [
+            dict(id=tr.id, status=tr.status, misses=tr.misses,
+                 observation_age_s=max(0., self.get_clock().now().nanoseconds*1e-9-tr.stamp),
+                 accepted_recent=len(tr.motion.accepted_stamps), rejected_total=tr.motion.rejected_count,
+                 velocity_std_m_s=float(np.sqrt(np.linalg.eigvalsh(tr.motion_covariance[2:, 2:])[-1])),
+                 speed_valid=bool(tr.speed_valid),
+                 qualification_reason=tr.motion.qualification_reason,
+                 reacquisitions=tr.reacquisitions)
+            for tr in self._tracker.tracks]
         msg = String()
         msg.data = json.dumps(report, allow_nan=False)
         self._pub_diagnostics.publish(msg)
@@ -244,60 +273,67 @@ class BlockDetectorNode(Node):
             return
         self._processing = True
         try:
-            for color, color_stamp, color_frame in list(self._colors):
-                color_time = self._stamp_sec(color_stamp)
-                if color_time <= self._last_color_stamp:
-                    continue
-                frame = self._depth_source.closest(color_stamp, self._p['sync_max_delta_s'], self._last_depth_stamp)
-                if frame is None or self._stamp_sec(frame.stamp) <= self._last_depth_stamp:
-                    continue
-                depth_time = self._stamp_sec(frame.stamp)
-                self._last_color_stamp, self._last_depth_stamp = color_time, depth_time
-                now = self.get_clock().now().nanoseconds * 1e-9
-                started = time.perf_counter()
-                try:
-                    if not (-self._p['sync_max_delta_s'] <= now-depth_time <= self._p['image_max_age_s']):
-                        raise ValueError('RGB-D capture timestamp is stale or in the future')
-                    self._camera.check_grid(color, color_frame)
-                    self._depth_source.check_camera(self._camera, frame)
-                    depth = frame.depth
-                    if self._d2c != (0, 0):
-                        depth = shift_depth(depth, *self._d2c)
-                    tf_mat = self._get_camera_to_base_tf(frame.stamp)
-                    if tf_mat is None:
-                        raise ValueError('No optical-to-base TF at depth capture time')
-                    transform = np.eye(4)
-                    transform[:3, :3], transform[:3, 3] = tf_mat
-                    check_transform(transform)
-                    self._color, self._color_stamp = color, color_stamp
-                    if self._p['plane_calibration_enabled']:
-                        self._calibrate(color, depth, transform, depth_time)
-                        continue  # Calibration never publishes candidate tracks.
-                    if self._p['detection_mode'] == 'legacy_depth':
-                        detections, _ = detect_legacy(color, depth, self._camera, transform,
-                            self._plane, self._p,
-                            refit=self._frame_count % self._p['plane_refresh_every'] == 0)
-                        if self._plane.coeffs is None:
-                            raise ValueError('Legacy plane fit unavailable')
-                    else:
-                        if self._plane_context is None:
-                            raise ValueError('No validated empty-belt plane file')
-                        check_plane_context(self._plane_context, self._camera, transform,
-                                            self._p['base_frame'], self._d2c)
-                        detections, _ = detect_blocks(color, depth, self._camera, transform,
-                                                      self._base_plane, self._p)
-                    self._frame_count += 1
-                    tracks = self._tracker.update(detections, depth_time)
-                    self._publish_tracks(tracks, frame.stamp)
-                    if self._pub_debug is not None:
-                        self._publish_debug(tracks, frame.stamp)
-                    self._diagnostics.update(processed_frames=self._diagnostics['processed_frames'] + 1,
-                        detections=len(detections), process_ms=(time.perf_counter()-started)*1000,
-                        sync_delta_ms=abs(color_time-depth_time)*1000, last_error='')
-                except (ValueError, OSError, cv2.error) as error:
-                    self._diagnostics['rejected_frames'] += 1
-                    self._diagnostics['last_error'] = str(error)
-                    self.get_logger().warning(f'Detection rejected: {error}', throttle_duration_sec=2.)
+            now = self.get_clock().now().nanoseconds*1e-9
+            pair = newest_pair(self._colors, self._depth_source, self._p['sync_max_delta_s'],
+                               self._last_color_stamp, self._last_depth_stamp, now,
+                               self._p['image_max_age_s'])
+            if pair is None:
+                return
+            color, color_stamp, color_frame, frame = pair
+            color_time = self._stamp_sec(color_stamp)
+            older = sum(self._last_color_stamp < self._stamp_sec(entry[1]) < color_time
+                        for entry in self._colors)
+            self._diagnostics['backlog_frames_dropped'] = self._diagnostics.get('backlog_frames_dropped', 0)+older
+            depth_time = self._stamp_sec(frame.stamp)
+            self._last_color_stamp, self._last_depth_stamp = color_time, depth_time
+            now = self.get_clock().now().nanoseconds * 1e-9
+            started = time.perf_counter()
+            try:
+                if not (-self._p['sync_max_delta_s'] <= now-depth_time <= self._p['image_max_age_s']):
+                    raise ValueError('RGB-D capture timestamp is stale or in the future')
+                self._camera.check_grid(color, color_frame)
+                self._depth_source.check_camera(self._camera, frame)
+                depth = frame.depth
+                if self._d2c != (0, 0):
+                    depth = shift_depth(depth, *self._d2c)
+                tf_mat = self._get_camera_to_base_tf(frame.stamp)
+                if tf_mat is None:
+                    raise ValueError('No optical-to-base TF at depth capture time')
+                transform = np.eye(4)
+                transform[:3, :3], transform[:3, 3] = tf_mat
+                check_transform(transform)
+                self._color, self._color_stamp = color, color_stamp
+                if self._p['plane_calibration_enabled']:
+                    self._calibrate(color, depth, transform, depth_time)
+                    return  # Calibration never publishes candidate tracks.
+                if self._p['detection_mode'] == 'legacy_depth':
+                    detections, _ = detect_legacy(color, depth, self._camera, transform,
+                        self._plane, self._p,
+                        refit=self._frame_count % self._p['plane_refresh_every'] == 0)
+                    if self._plane.coeffs is None:
+                        raise ValueError('Legacy plane fit unavailable')
+                else:
+                    if self._plane_context is None:
+                        raise ValueError('No validated empty-belt plane file')
+                    check_plane_context(self._plane_context, self._camera, transform,
+                                        self._p['base_frame'], self._d2c)
+                    detections, _ = detect_blocks(color, depth, self._camera, transform,
+                                                  self._base_plane, self._p)
+                self._frame_count += 1
+                tracks = self._tracker.update(detections, depth_time)
+                self._publish_tracks(tracks, frame.stamp)
+                self._publish_debug_if_due(tracks, frame.stamp)
+                self._diagnostics.update(processed_frames=self._diagnostics['processed_frames'] + 1,
+                    detections=len(detections), process_ms=(time.perf_counter()-started)*1000,
+                    sync_delta_ms=abs(color_time-depth_time)*1000,
+                    capture_age_ms=(self.get_clock().now().nanoseconds*1e-9-depth_time)*1000,
+                    last_error='')
+            except (ValueError, OSError, cv2.error) as error:
+                self._diagnostics['rejected_frames'] += 1
+                self._diagnostics['last_error'] = str(error)
+                self.get_logger().warning(f'Detection rejected: {error}', throttle_duration_sec=2.)
+                self._publish_debug_if_due([], color_stamp, image=color,
+                                           frame_id=color_frame, error=str(error))
         finally:
             self._processing = False
 
@@ -378,11 +414,24 @@ class BlockDetectorNode(Node):
             msg.tracks.append(t)
         self._pub_tracks.publish(msg)
 
-    def _publish_debug(self, tracks, stamp):
-        img = draw_speed_overlay(self._color, tracks)
+    def _publish_debug_if_due(self, tracks, stamp, **kwargs):
+        wall_now = time.perf_counter()
+        if self._pub_debug is not None and wall_now-getattr(self, '_last_debug_time', -np.inf) >= 1./self._p['debug_rate_hz']:
+            self._publish_debug(tracks, stamp, **kwargs)
+            self._last_debug_time = wall_now
+            self._diagnostics['debug_frames_published'] = self._diagnostics.get('debug_frames_published', 0)+1
+
+    def _publish_debug(self, tracks, stamp, image=None, frame_id=None, error=None):
+        image = self._color if image is None else image
+        width = self._p['debug_max_width']
+        scale = min(1., width/image.shape[1]) if width else 1.
+        if scale < 1.:
+            image = cv2.resize(image, (int(round(image.shape[1]*scale)),
+                                      int(round(image.shape[0]*scale))), interpolation=cv2.INTER_AREA)
+        img = draw_speed_overlay(image, tracks, pixel_scale=scale, error=error)
         msg = self._bridge.cv2_to_imgmsg(img, 'bgr8')
         msg.header.stamp = stamp
-        msg.header.frame_id = self._p['camera_optical_frame']
+        msg.header.frame_id = self._p['camera_optical_frame'] if frame_id is None else frame_id
         self._pub_debug.publish(msg)
 
 
