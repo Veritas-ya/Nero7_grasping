@@ -13,6 +13,7 @@ import os
 import threading
 import time
 
+import cv2
 import numpy as np
 import torch
 
@@ -20,15 +21,34 @@ from .grconvnet.post_process import post_process_output
 from .grconvnet.grasp import detect_grasps
 
 CROP = 224
-# trained with RGB: img/255 - mean; depth: img/255 - mean (see CameraData)
-# real depth arrives in mm as uint16 -> scale so values land in the
-# 0..255-ish range the network saw during training (mm/4 for 0..1m)
-DEPTH_MM_SCALE = 4.0
+
+
+def prepare_network_input(rgb, depth_mm):
+    """Match Jacquard training normalization; fill holes only for the CNN.
+
+    The original registered depth remains untouched for object masks and metric
+    grasp backprojection. An inferred depth must never become measured geometry.
+    """
+    depth = np.asarray(depth_mm, np.float32)/1000.
+    valid = np.isfinite(depth) & (depth > 0)
+    if not valid.any():
+        raise ValueError('No valid depth in network crop')
+    invalid = ~valid
+    if invalid.any():
+        scale = float(depth[valid].max())
+        padded = cv2.copyMakeBorder(np.where(valid, depth/scale, 0).astype(np.float32),
+                                    1, 1, 1, 1, cv2.BORDER_DEFAULT)
+        mask = cv2.copyMakeBorder(invalid.astype(np.uint8), 1, 1, 1, 1, cv2.BORDER_DEFAULT)
+        depth = cv2.inpaint(padded, mask, 1, cv2.INPAINT_NS)[1:-1, 1:-1]*scale
+    depth = np.clip(depth-depth.mean(), -1., 1.)
+    color = np.asarray(rgb, np.float32)/255.
+    color = color-color.mean()
+    return np.concatenate([depth[None], color.transpose(2, 0, 1)], axis=0).astype(np.float32)
 
 
 class GraspInference:
     def __init__(self, model_path, device='cuda', max_rate=10.0,
-                 q_threshold=0.25, target_radius_px=60.0):
+                 q_threshold=0.20, target_radius_px=60.0):
         self._device = device
         self._max_dt = 1.0 / max_rate
         self._q_threshold = q_threshold
@@ -122,18 +142,17 @@ class GraspInference:
         crop_rgb, crop_d, crop_u0, crop_v0 = make_crop(
             rgb, depth, req['u'], req['v'], size=CROP)
 
-        # normalize depth: mm -> scaled float -> /255 - mean (as trained)
-        d = crop_d.astype(np.float32) / DEPTH_MM_SCALE / 255.0
-        d -= d.mean()
-        r = crop_rgb.astype(np.float32) / 255.0
-        r -= r.mean(axis=(0, 1), keepdims=True)
-        x = np.concatenate([d[None, :, :], r.transpose(2, 0, 1)], axis=0)
-        x = torch.from_numpy(x[None, ...].astype(np.float32)).to(self._device)
+        x = torch.from_numpy(prepare_network_input(crop_rgb, crop_d)[None]).to(self._device)
 
         with torch.no_grad():
             pred = self._model.predict(x)
         q_img, ang_img, width_img = post_process_output(
             pred['pos'], pred['cos'], pred['sin'], pred['width'])
+
+        diagnostics = dict(raw_q_max=float(np.max(q_img)),
+                           target_radius_px=self._target_radius_px,
+                           network_depth_holes=int(np.count_nonzero(
+                               ~np.isfinite(crop_d) | (crop_d <= 0))))
 
         if req.get('belt_z') is not None:
             # Select network peaks on the detected object, not on belt/background.
@@ -148,17 +167,22 @@ class GraspInference:
             mask = (np.isfinite(dm) & (dm > 0)
                     & ((us-req['u'])**2+(vs-req['v'])**2 < self._target_radius_px**2)
                     & (bz > req['belt_z']+.005) & (bz < req['belt_z']+.12))
+            diagnostics['valid_object_pixels'] = int(np.count_nonzero(mask))
             q_img = np.where(mask, q_img, 0)
+        diagnostics['masked_q_max'] = float(np.max(q_img))
         grasps = detect_grasps(q_img, ang_img, width_img)
         if not grasps:
-            return dict(status=1, stamp=req['stamp'])
+            return dict(status=1, stamp=req['stamp'], reason='no_peak_after_object_mask',
+                        diagnostics=diagnostics)
         g = grasps[0]  # highest q peak
 
         # grasp point in the full color grid
         cy, cx = g.center  # [y, x] within the crop
         score = float(q_img[cy, cx])
         if score < self._q_threshold:
-            return dict(status=1, stamp=req['stamp'], score=score)
+            return dict(status=1, stamp=req['stamp'], score=score,
+                        reason='score_below_threshold', threshold=self._q_threshold,
+                        diagnostics=diagnostics)
         u = crop_u0 + cx
         v = crop_v0 + cy
         K = req['K']
@@ -170,11 +194,13 @@ class GraspInference:
             dv = depth[max(0, vi-2):vi+3, max(0, ui-2):ui+3].astype(np.float32)
             dv[dv <= 0] = np.nan
             if not np.isfinite(dv).any():
-                return dict(status=1, stamp=req['stamp'])
+                return dict(status=1, stamp=req['stamp'], reason='invalid_grasp_depth',
+                            u_px=float(u), v_px=float(v), diagnostics=diagnostics)
             z = float(np.nanmedian(dv))
             z = z / 1000.0 if np.isfinite(z) else 0.0
             if z <= 0:
-                return dict(status=1, stamp=req['stamp'])
+                return dict(status=1, stamp=req['stamp'], reason='invalid_grasp_depth',
+                            u_px=float(u), v_px=float(v), diagnostics=diagnostics)
 
         # backproject center + direction vector to 3D in camera frame
         p0 = _backproject(u, v, z, K)

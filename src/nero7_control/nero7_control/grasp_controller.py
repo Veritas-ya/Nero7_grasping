@@ -149,7 +149,7 @@ class GraspControllerNode(Node):
             self._inference = GraspInference(
                 params['model_path'], device=params['inference_device'],
                 max_rate=params['infer_max_rate'],
-                q_threshold=params.get('q_threshold', 0.25),
+                q_threshold=params.get('q_threshold', 0.20),
                 target_radius_px=params['infer_target_radius_px'])
         except Exception as e:  # noqa: BLE001 - run without the network
             self.get_logger().error(f'failed to load grasp model: {e}')
@@ -392,7 +392,7 @@ _DEFAULTS = {
     'base_frame': 'base_link',
     'camera_optical_frame': 'camera_color_optical_frame',
     'model_path': '/home/ubuntu22/grasp/robotic-grasping/trained-models/jacquard-rgbd-grconvnet3-drop0-ch32',
-    'infer_max_rate': 10.0, 'result_max_age': 0.2, 'q_threshold': 0.25,
+    'infer_max_rate': 10.0, 'result_max_age': 0.2, 'q_threshold': 0.20,
     'inference_device': 'cuda',
     'belt_file': '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml',
     'approach_height': 0.08, 'descend_offset': 0.04, 'lift_height': 0.12,

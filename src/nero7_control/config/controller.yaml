@@ -23,7 +23,7 @@ grasp_controller:
     model_path: /home/ubuntu22/grasp/robotic-grasping/trained-models/jacquard-rgbd-grconvnet3-drop0-ch32
     infer_max_rate: 10.0
     result_max_age: 0.2
-    q_threshold: 0.25
+    q_threshold: 0.20
 
     # --- belt ---
     belt_file: /home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/belt.yaml

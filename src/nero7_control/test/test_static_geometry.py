@@ -29,6 +29,7 @@ class GeometryTest(unittest.TestCase):
         inference = GraspInference.__new__(GraspInference)
         inference._device = 'cpu'
         inference._q_threshold = .25
+        inference._target_radius_px = 60.
         outputs = {k: torch.zeros((1, 1, 224, 224)) for k in ['pos', 'cos', 'sin', 'width']}
         outputs['pos'] += 1
         outputs['sin'] += 1

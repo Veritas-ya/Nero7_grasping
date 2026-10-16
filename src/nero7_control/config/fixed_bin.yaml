@@ -1,0 +1,169 @@
+schema_version: 1
+frame_id: base_link
+units: m_rad
+configured: true
+pose_type: joints
+via_joints_rad:
+- - 0.6209183346895026
+  - 0.8499753457212386
+  - 0.5867971478130136
+  - 1.134847986231753
+  - -0.5462182427041453
+  - -0.05885250237724879
+  - 1.1531913966702132
+above_joints_rad:
+- 0.5712175250920607
+- 1.1219072236960816
+- 0.8863345501942427
+- 0.8291106898910563
+- -0.7807889074962615
+- -0.058852502407267686
+- 1.4968170815202446
+release_joints_rad:
+- 0.6256307236698873
+- 1.3343740263197446
+- 0.650344585878127
+- 0.8888438281631522
+- -0.7429692092814661
+- -0.05885250237724879
+- 1.1531913966702132
+above_tcp_pose_m_rad:
+- -0.3309375618779181
+- -0.38246568960447375
+- 0.05572062125660937
+- 1.4335187795485143
+- 1.5172237813091969
+- 1.106250279359364
+release_tcp_pose_m_rad: &id001
+- -0.3309375618787064
+- -0.3824656896051001
+- -0.09427937874301245
+- 1.433518779561526
+- 1.5172237813032416
+- 1.1062502793807176
+measurements:
+  waiting:
+    source: user_supplied_robot_view
+    joint_order:
+    - J1
+    - J2
+    - J3
+    - J4
+    - J5
+    - J6
+    - J7
+    flange_xyz_mm:
+    - -267.363
+    - -381.03
+    - 262.964
+    flange_rpy_deg:
+    - -122.5
+    - 81.93
+    - -140.213
+    joints_deg:
+    - 35.576
+    - 48.7
+    - 33.621
+    - 65.022
+    - -31.296
+    - -3.372
+    - 66.073
+    model_position_error_m: 4.64804522580184e-05
+    model_rotation_error_rad: 9.778021380907577e-05
+    model_tcp_pose_m_rad:
+    - -0.30915938798807263
+    - -0.382376553972217
+    - 0.08259512389715179
+    - -2.1378644476920887
+    - 1.430042662437288
+    - -2.4470053099101556
+    motion_sent: false
+  release:
+    source: user_supplied_robot_view
+    joint_order:
+    - J1
+    - J2
+    - J3
+    - J4
+    - J5
+    - J6
+    - J7
+    flange_xyz_mm:
+    - -313.511
+    - -406.691
+    - 88.456
+    flange_rpy_deg:
+    - 82.2
+    - 86.936
+    - 63.449
+    joints_deg:
+    - 35.846
+    - 76.454
+    - 37.262
+    - 50.927
+    - -42.569
+    - -3.372
+    - 66.073
+    model_position_error_m: 4.910329321359755e-05
+    model_rotation_error_rad: 0.00011355188754124431
+    model_tcp_pose_m_rad: *id001
+    motion_sent: false
+  final_stop:
+    source: user_supplied_robot_view_confirmed_live_feedback
+    joint_order:
+    - J1
+    - J2
+    - J3
+    - J4
+    - J5
+    - J6
+    - J7
+    flange_xyz_mm:
+    - -422.714
+    - 41.472
+    - 260.326
+    flange_rpy_deg:
+    - -152.752
+    - 83.337
+    - 114.667
+    joints_deg:
+    - -7.622
+    - 36.934
+    - -1.793
+    - 80.195
+    - -7.201
+    - -3.375
+    - 59.224
+    measured_joints_rad:
+    - -0.1330289955870078
+    - 0.6446199059315856
+    - -0.031276300195738384
+    - 1.3996493403443326
+    - -0.12566370614359174
+    - -0.05890486225480862
+    - 1.0336537962011219
+    model_position_error_m: 4.441926389975579e-05
+    motion_sent: false
+derived_above:
+  source: offline_IK_vertical_above_user_release
+  height_above_release_m: 0.15
+  note: Computed approach, not a physically taught pose. User waiting pose is retained
+    as a via waypoint.
+imported_at: '2026-10-16T12:31:23.466468+08:00'
+calibration_file: src/nero7_bringup/config/calibration.yaml
+return_path_joints_rad:
+- - 0.6209183346895026
+  - 0.8499753457212386
+  - 0.5867971478130136
+  - 1.134847986231753
+  - -0.5462182427041453
+  - -0.05885250237724879
+  - 1.1531913966702132
+initial_joints_rad:
+- -0.1330289955870078
+- 0.6446199059315856
+- -0.031276300195738384
+- 1.3996493403443326
+- -0.12566370614359174
+- -0.05890486225480862
+- 1.0336537962011219
