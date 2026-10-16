@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="nero">
+  <xacro:include filename="$(find agx_arm_description)/agx_arm_urdf/nero/urdf/nero_with_gripper_flange_description.xacro"/>
+  <!-- Conservative primitives replace missing vendor meshes.  Dimensions
+       enclose the physical gripper rather than understating its envelope. -->
+  <link name="gripper_base">
+    <visual><origin xyz="0 0 0.060"/><geometry><box size="0.075 0.075 0.120"/></geometry></visual>
+    <collision><origin xyz="0 0 0.060"/><geometry><box size="0.080 0.080 0.125"/></geometry></collision>
+    <inertial><mass value="0.45"/><origin xyz="0 0 0.050"/>
+      <inertia ixx="0.00093" ixy="0" ixz="0" iyy="0.00072" iyz="0" izz="0.00040"/>
+    </inertial>
+  </link>
+  <joint name="gripper_base_joint" type="fixed">
+    <origin xyz="0 0 0.006"/><parent link="gripper_flange"/><child link="gripper_base"/>
+  </joint>
+  <link name="gripper_link"/>
+  <joint name="gripper" type="prismatic">
+    <parent link="gripper_base"/><child link="gripper_link"/>
+    <axis xyz="0 0 1"/><limit lower="0" upper="0.1" effort="10" velocity="3"/>
+  </joint>
+  <link name="gripper_link1">
+    <visual><origin xyz="0 -0.050 0.010"/><geometry><box size="0.020 0.105 0.025"/></geometry></visual>
+    <collision><origin xyz="0 -0.050 0.010"/><geometry><box size="0.024 0.110 0.030"/></geometry></collision>
+    <inertial><mass value="0.025"/><origin xyz="0 -0.05 0.01"/>
+      <inertia ixx="0.000074" ixy="0" ixz="0" iyy="0.000008" iyz="0" izz="0.000075"/>
+    </inertial>
+  </link>
+  <joint name="gripper_joint1" type="prismatic">
+    <origin xyz="0 0 0.138" rpy="1.5707963 0 3.1415926"/>
+    <parent link="gripper_base"/><child link="gripper_link1"/>
+    <axis xyz="0 0 1"/><limit lower="0" upper="0.05" effort="10" velocity="3"/>
+    <mimic joint="gripper" multiplier="0.5" offset="0"/>
+  </joint>
+  <link name="gripper_link2">
+    <visual><origin xyz="0 -0.050 0.010"/><geometry><box size="0.020 0.105 0.025"/></geometry></visual>
+    <collision><origin xyz="0 -0.050 0.010"/><geometry><box size="0.024 0.110 0.030"/></geometry></collision>
+    <inertial><mass value="0.025"/><origin xyz="0 -0.05 0.01"/>
+      <inertia ixx="0.000074" ixy="0" ixz="0" iyy="0.000008" iyz="0" izz="0.000075"/>
+    </inertial>
+  </link>
+  <joint name="gripper_joint2" type="prismatic">
+    <origin xyz="0 0 0.138" rpy="1.5707963 0 0"/>
+    <parent link="gripper_base"/><child link="gripper_link2"/>
+    <axis xyz="0 0 -1"/><limit lower="-0.05" upper="0" effort="10" velocity="3"/>
+    <mimic joint="gripper" multiplier="-0.5" offset="0"/>
+  </joint>
+</robot>

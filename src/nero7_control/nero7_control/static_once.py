@@ -6,7 +6,6 @@ used. Preview is the default; execution_enabled starts exactly one cycle.
 import json
 import time
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import yaml
 import rclpy
@@ -17,8 +16,9 @@ from std_srvs.srv import SetBool
 from ament_index_python.packages import get_package_share_directory
 from .kinematics import Kinematics, yaw_orientations
 from .gripper_feedback import GripperFeedbackMonitor
-from .fixed_bin import (load_fixed_bin, plan_fixed_bin, plan_fixed_bin_return,
-                        placement_summary, fixed_bin_profile_current)
+from .fixed_bin import (load_fixed_bin, fixed_bin_targets,
+                        fixed_bin_profile_current)
+from .moveit_rrtconnect import RrtConnectPlanner
 from .ready_pose import require_limits
 
 
@@ -41,14 +41,12 @@ class StaticOnce:
         self.grip_goal = None
         self.gripper_feedback = GripperFeedbackMonitor()
         self.failure = None
-        self.bin_planner = ThreadPoolExecutor(max_workers=1, thread_name_prefix='bin_preflight')
-        self.bin_plan_future = None
         declare = lambda key, default: node.declare_parameter(key, default).value
         path = declare('calibration_file', '/home/ubuntu22/Nero7_grasping/src/nero7_bringup/config/calibration.yaml')
         with open(path) as f:
             self.calibration = yaml.safe_load(f)
         self.tcp = np.asarray(self.calibration['gripper_tcp'], float)
-        self.axis = declare('closing_axis_flange', [0., 0., 1.])
+        self.axis = declare('closing_axis_flange', [0., 1., 0.])
         self.roi = declare('static_roi_px', [180, 355, 1060, 475])
         self.center_source = declare('static_center_source', 'network')
         if self.center_source not in ('network', 'track_centroid'):
@@ -68,6 +66,17 @@ class StaticOnce:
         self.bin_workspace = {key: float(declare('static_bin_workspace.'+key, value))
                               for key, value in dict(x_min=-.50, x_max=.45,
                                   y_min=-.46, y_max=.35, z_min=-.05).items()}
+        self.rrt = RrtConnectPlanner(
+            node,
+            action_name=declare('static_moveit_action', '/move_action'),
+            planner_id=declare('static_moveit_planner_id', 'RRTConnectkConfigDefault'),
+            planning_time=float(declare('static_moveit_planning_time', 2.0)),
+            require_octomap=bool(declare('static_require_octomap', True)),
+            point_cloud_topic=declare(
+                'static_moveit_point_cloud_topic', '/camera/depth/points'))
+        self.rrt_path = None
+        self.rrt_index = 0
+        self.rrt_returning = False
 
         urdf = declare('urdf_path', '/home/ubuntu22/nero_ws/install/nero_description/share/nero_description/urdf/nero_description.urdf')
         self.kin = Kinematics(urdf)
@@ -114,16 +123,15 @@ class StaticOnce:
     def _abort(self, reason):
         self.failure = reason
         self.node.get_logger().error('STATIC_ABORT: '+reason)
-        if getattr(self, 'bin_plan_future', None) is not None:
-            self.bin_plan_future.cancel()
+        if getattr(self, 'rrt', None) is not None:
+            self.rrt.cancel()
         if self.motion_issued:
             self.arm.estop()
         self._set('STATIC_ABORT')
 
     def shutdown(self):
-        planner = getattr(self, 'bin_planner', None)
-        if planner is not None:
-            planner.shutdown(wait=False, cancel_futures=True)
+        if getattr(self, 'rrt', None) is not None:
+            self.rrt.cancel()
         if self.motion_issued:
             future = self.arm.estop()
             if future is not None and self.node.context.ok():
@@ -140,7 +148,8 @@ class StaticOnce:
     def _motion(self, point, state, joints=None, rotation=None):
         rotation = self.plan['rotation'] if rotation is None else rotation
         flange = np.asarray(point)-rotation.apply(self.tcp)
-        ws = self.bin_workspace if state.startswith('STATIC_BIN_') else self.node._p['workspace']
+        ws = (self.bin_workspace if state.startswith(('STATIC_BIN_', 'STATIC_RRTCONNECT_'))
+              else self.node._p['workspace'])
         if not (ws['x_min'] <= flange[0] <= ws['x_max'] and ws['y_min'] <= flange[1] <= ws['y_max'] and flange[2] >= ws['z_min']):
             raise ValueError('Flange pose outside configured workspace')
         pose = [*flange.tolist(), *rotation.as_euler('xyz').tolist()]
@@ -183,67 +192,70 @@ class StaticOnce:
             raise ValueError('Measured TCP has not reached the bin segment endpoint')
         return q
 
-    def _begin_bin_replan(self, returning=False):
+    def _begin_rrtconnect(self, returning=False):
+        """Plan immediately from the measured post-lift/retract state."""
+        placement = self.plan.get('placement')
+        if placement is None:
+            placement = fixed_bin_targets(
+                self.kin, self.tcp.copy(), self.bin_profile, dict(self.bin_workspace))
+            self.plan['placement'] = placement
         if returning:
-            placement = self.plan['placement']
             q = self._require_bin_pose(placement['above'], placement['rotation'])
-            function, args = plan_fixed_bin_return, (placement,)
-            state = 'STATIC_BIN_RETURN_REPLAN'
+            target = placement.get('initial_joints')
+            if target is None:
+                self._set('STATIC_DONE')
+                return
+            state = 'STATIC_RRTCONNECT_RETURN_PLAN'
         else:
             self._require_bin_holding()
             q = self._require_bin_pose(self.plan['lift'], self.plan['rotation'])
-            function, args = plan_fixed_bin, (self.bin_profile,)
-            state = 'STATIC_BIN_REPLAN'
-        self.bin_plan_seed = q.copy()
-        # Keep ROS callbacks running while IK and sampled route checks execute.
-        self.bin_plan_future = self.bin_planner.submit(function, self.kin, q,
-            self.tcp.copy(), *args, self.plan['belt_z'], dict(self.bin_workspace))
+            target = placement['above_joints']
+            state = 'STATIC_RRTCONNECT_BIN_PLAN'
+        self.rrt_seed = q.copy()
+        self.rrt_returning = returning
+        width = self.gripper_feedback.reading(time.monotonic())
+        if width is None:
+            raise ValueError('Fresh gripper state required for collision planning')
+        self.rrt.begin(q, target, gripper_width=width)
         self._set(state)
 
-    def _finish_bin_replan(self, returning=False):
-        if not self.bin_plan_future.done():
-            if self._motion_time()-self.started > 20:
-                raise ValueError('Bin path recomputation timed out; retaining current pose')
+    def _finish_rrtconnect(self):
+        if not self.rrt.busy:
+            raise ValueError('RRTConnect planner stopped without a path')
+        path = self.rrt.poll()
+        if path is None:
             return
-        placement = self.bin_plan_future.result()
-        # A new plan is valid only if the measured arm stayed at its snapshot.
-        self._require_bin_seed(self.bin_plan_seed)
-        self.plan['placement'] = placement
-        self.bin_plan_future = None
-        self.node.get_logger().info('BIN_PATH_REPLANNED '+json.dumps(dict(
-            stage='return' if returning else 'transfer',
-            actual_seed_joints_rad=self.bin_plan_seed.tolist(),
-            fixed_bin=placement_summary(placement))))
-        if returning:
-            self._bin_return(0)
+        self._require_bin_seed(self.rrt_seed)
+        self.rrt_path = path
+        self.rrt_index = 0
+        if not path:
+            self._finish_rrt_route()
+            return
+        self._rrt_move(0)
+
+    def _rrt_move(self, index):
+        q = self.rrt_path[index]
+        transform = self.kin.fk(q)
+        rotation = Rotation.from_matrix(transform[:3, :3])
+        self.rrt_index = index
+        state = ('STATIC_RRTCONNECT_RETURN_EXECUTE' if self.rrt_returning
+                 else 'STATIC_RRTCONNECT_BIN_EXECUTE')
+        self._motion(transform[:3, 3]+rotation.apply(self.tcp), state, q, rotation)
+
+    def _finish_rrt_route(self):
+        placement = self.plan['placement']
+        if self.rrt_returning:
+            self._require_bin_seed(placement['initial_joints'])
+            self._set('STATIC_INITIAL_READY')
         else:
-            self._bin_transfer(0)
+            self._require_bin_pose(placement['above'], placement['rotation'])
+            self._motion(placement['release'], 'STATIC_BIN_DESCEND',
+                         rotation=placement['rotation'])
 
     def _require_bin_holding(self):
         width = self.gripper_feedback.reading(time.monotonic())
         if width is None or not self.plan['close_width']+.003 < width < self.open_width-.01:
             raise ValueError('Fresh feedback no longer confirms a held object; bin path stopped')
-
-    def _bin_transfer(self, index):
-        placement = self.plan['placement']
-        self._require_bin_holding()
-        previous = placement['lift_joints'] if index==0 else placement['transfer_joints'][index-1]
-        self._require_bin_seed(previous)
-        q = placement['transfer_joints'][index]
-        transform = self.kin.fk(q)
-        rotation = Rotation.from_matrix(transform[:3, :3])
-        self.bin_transfer_index = index
-        self._motion(transform[:3, 3]+rotation.apply(self.tcp), 'STATIC_BIN_TRANSFER', q, rotation)
-
-    def _bin_return(self, index):
-        placement = self.plan['placement']
-        previous = placement['above_joints'] if index==0 else placement['return_joints'][index-1]
-        self._require_bin_seed(previous)
-        q = placement['return_joints'][index]
-        transform = self.kin.fk(q)
-        rotation = Rotation.from_matrix(transform[:3, :3])
-        self.bin_return_index = index
-        self._motion(transform[:3, 3]+rotation.apply(self.tcp), 'STATIC_BIN_RETURN', q, rotation)
 
     def _arrived(self):
         position, rotation = self._actual()
@@ -463,21 +475,17 @@ class StaticOnce:
                 else:
                     self._motion(self.plan['lift'], 'STATIC_LIFT')
             elif self.state == 'STATIC_LIFT' and self._arrived():
-                self._set('STATIC_HOLD')
-            elif self.state == 'STATIC_HOLD' and self._motion_time()-self.started > 2:
-                self._begin_bin_replan()
-            elif self.state == 'STATIC_BIN_REPLAN':
+                self._begin_rrtconnect()
+            elif self.state == 'STATIC_RRTCONNECT_BIN_PLAN':
                 self._require_bin_holding()
-                self._finish_bin_replan()
-            elif self.state == 'STATIC_BIN_TRANSFER':
+                self._finish_rrtconnect()
+            elif self.state == 'STATIC_RRTCONNECT_BIN_EXECUTE':
                 self._require_bin_holding()
                 if self._arrived():
-                    placement = self.plan['placement']
-                    if self.bin_transfer_index+1 < len(placement['transfer_joints']):
-                        self._bin_transfer(self.bin_transfer_index+1)
+                    if self.rrt_index+1 < len(self.rrt_path):
+                        self._rrt_move(self.rrt_index+1)
                     else:
-                        self._require_bin_seed(placement['above_joints'])
-                        self._motion(placement['release'], 'STATIC_BIN_DESCEND', rotation=placement['rotation'])
+                        self._finish_rrt_route()
             elif self.state == 'STATIC_BIN_DESCEND':
                 self._require_bin_holding()
                 if self._arrived():
@@ -496,26 +504,21 @@ class StaticOnce:
                 elif self._motion_time()-self.started > 4.:
                     raise ValueError('Bin release opening not confirmed')
             elif self.state == 'STATIC_BIN_RETRACT' and self._arrived():
-                if self.plan['placement']['return_joints']:
-                    self._begin_bin_replan(returning=True)
-                else:
-                    self._set('STATIC_DONE')
-            elif self.state == 'STATIC_BIN_RETURN_REPLAN':
+                self._begin_rrtconnect(returning=True)
+            elif self.state == 'STATIC_RRTCONNECT_RETURN_PLAN':
                 width = self.gripper_feedback.reading(time.monotonic())
                 if width is None or width < self.open_width-.003:
                     raise ValueError('Fresh open-gripper feedback required before replanning return')
-                self._finish_bin_replan(returning=True)
-            elif self.state == 'STATIC_BIN_RETURN':
+                self._finish_rrtconnect()
+            elif self.state == 'STATIC_RRTCONNECT_RETURN_EXECUTE':
                 width = self.gripper_feedback.reading(time.monotonic())
                 if width is None or width < self.open_width-.003:
                     raise ValueError('Fresh open-gripper feedback required during bin return')
                 if self._arrived():
-                    points = self.plan['placement']['return_joints']
-                    self._require_bin_seed(points[self.bin_return_index])
-                    if self.bin_return_index+1 < len(points):
-                        self._bin_return(self.bin_return_index+1)
+                    if self.rrt_index+1 < len(self.rrt_path):
+                        self._rrt_move(self.rrt_index+1)
                     else:
-                        self._set('STATIC_INITIAL_READY')
+                        self._finish_rrt_route()
             elif self.state == 'STATIC_INITIAL_READY':
                 self._set('STATIC_DONE')
             elif self.state == 'STATIC_RECOVER_OPEN' and self._motion_time()-self.started > 1.5:

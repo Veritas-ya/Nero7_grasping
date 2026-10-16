@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="nero">
+  <xacro:include filename="$(find nero_description)/urdf/nero_description.urdf"/>
+  <link name="gripper_flange">
+    <visual><geometry><cylinder radius="0.035" length="0.025"/></geometry></visual>
+    <collision><geometry><cylinder radius="0.038" length="0.028"/></geometry></collision>
+    <inertial><mass value="0.048"/><origin xyz="0 0 0"/>
+      <inertia ixx="0.00004" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.00003"/>
+    </inertial>
+  </link>
+  <joint name="gripper_flange_joint" type="fixed">
+    <origin xyz="0.031 0 -0.0235" rpy="-1.5708 0 -1.5708"/>
+    <parent link="link7"/><child link="gripper_flange"/>
+  </joint>
+</robot>

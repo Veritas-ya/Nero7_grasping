@@ -9,6 +9,8 @@
 
   <exec_depend>nero7_perception</exec_depend>
   <exec_depend>nero7_control</exec_depend>
+  <exec_depend>agx_arm_description</exec_depend>
+  <exec_depend>agx_arm_moveit</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>python3-numpy</exec_depend>

@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>agx_arm_description</name>
+  <version>0.1.1</version>
+  <description>Project-local Nero description overlay with conservative gripper collision geometry.</description>
+  <maintainer email="ubuntu22@todo.todo">ubuntu22</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <exec_depend>nero_description</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

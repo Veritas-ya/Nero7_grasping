@@ -30,3 +30,4 @@ htmlcov/
 # Generated ROS transform diagrams
 /frames_*.gv
 /frames_*.pdf
+.moveit_local/

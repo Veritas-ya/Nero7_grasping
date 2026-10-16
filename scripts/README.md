@@ -1,9 +1,24 @@
 # 当前静止抓取入口
 
-`bash scripts/static_once_bin.sh` 自动编译根目录 `src` 的四个所需包，核对实际加载的
+`bash scripts/static_once_bin.sh` 自动编译根目录 `src` 的五个所需包，核对实际加载的
 `static_once.py` 与用户源码一致，并以 `execution_enabled=false` 启动。
 相机、物体检测和单个机械臂驱动需要保持运行。脚本统一 ROS domain 0、本机发现，
-显式指定当前标定路径和左侧拾取区，不修改用户的抓取状态机。
+显式指定当前标定路径和左侧拾取区，并自动启动仅规划模式的 MoveIt。
+
+本机首次使用且没有系统 MoveIt 时，先执行一次：
+
+```bash
+bash /home/ubuntu22/.codex/worktrees/da2d/Nero7_grasping/scripts/setup_moveit_local.sh
+```
+
+该脚本只把缺少的 MoveIt 二进制包解压到项目的 `.moveit_local`，不使用 sudo，
+不修改 `/opt/ros`。当前工作站已经完成这一步。
+
+夹紧后，控制器先完成 100 mm 垂直抬升，随后立即请求 OMPL
+`RRTConnectkConfigDefault` 从实测关节角规划到固定物料框上方。MoveIt 只规划，
+不会启动模拟控制器占用真实机械臂；现有 AGX 驱动依次执行返回的碰撞检查路径点。
+到达箱口上方后才垂直下降和释放，抬回箱口上方后再用 RRTConnect 回固定初始位。
+规划前必须同时满足相机点云新鲜且 MoveIt OctoMap 非空，否则停止在当前安全位置。
 
 看到 `STATIC_READY` 并具备现场执行条件后，另一终端运行：
 

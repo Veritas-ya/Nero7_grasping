@@ -21,6 +21,10 @@ while (($#)); do
 done
 cd -- "$workspace_dir"
 source /opt/ros/humble/setup.bash
+source "$script_dir/moveit_local_setup.bash"
+if [[ -f /home/ubuntu22/ws_moveit/install/setup.bash ]]; then
+    source /home/ubuntu22/ws_moveit/install/setup.bash
+fi
 source /home/ubuntu22/agx_arm_ws/install/setup.bash
 source /home/ubuntu22/nero_ws/install/setup.bash
 export ROS_DOMAIN_ID=0 ROS_LOCALHOST_ONLY=1
@@ -33,7 +37,8 @@ fi
 exec 9>/tmp/nero7_visual_once_operator.lock
 flock -n 9 || { echo '已有抓取或示教启动脚本运行，请先停止旧的抓取终端。';exit 1; }
 echo "编译您当前修改的版本：$workspace_dir/src/nero7_control/nero7_control/static_once.py"
-colcon build --base-paths src --packages-up-to nero7_bringup --symlink-install
+colcon build --base-paths src --packages-up-to nero7_bringup --symlink-install \
+    --allow-overriding agx_arm_description
 source install/setup.bash
 python3 "$script_dir/static_once_session.py" --check-workspace "$workspace_dir"
 echo "$$" > "$session_file"
@@ -42,6 +47,28 @@ cleanup() {
     if [[ -f "$session_file" ]] && [[ $(cat -- "$session_file") == "$$" ]]; then rm -f -- "$session_file";fi
 }
 trap cleanup EXIT
+moveit_pid=''
+if ! ros2 action list --no-daemon 2>/dev/null | grep -qx '/move_action'; then
+    echo '启动仅规划模式 MoveIt（RRTConnect + 相机 OctoMap）……'
+    ros2 launch nero7_bringup moveit_plan_only.launch.py \
+        arm_type:=nero effector_type:=agx_gripper follow:=true \
+        point_cloud_topic:=/camera/depth/points use_sim_time:=false \
+        > /tmp/nero7_moveit_plan_only.log 2>&1 &
+    moveit_pid=$!
+    for _ in $(seq 1 40); do
+        ros2 action list --no-daemon 2>/dev/null | grep -qx '/move_action' && break
+        sleep .25
+    done
+    if ! ros2 action list --no-daemon 2>/dev/null | grep -qx '/move_action'; then
+        cat /tmp/nero7_moveit_plan_only.log >&2
+        echo 'MoveIt /move_action 启动失败。' >&2
+        exit 1
+    fi
+fi
+cleanup_moveit() {
+    if [[ -n "$moveit_pid" ]]; then kill "$moveit_pid" 2>/dev/null || true; fi
+}
+trap 'cleanup_moveit; cleanup' EXIT
 echo '当前仅预览，不自动使能或移动机械臂。请保持相机、检测和一个机械臂驱动运行。'
 echo "看到 STATIC_READY 后，在另一终端运行：bash $script_dir/static_once_bin.sh --execute"
 ros2 run nero7_control grasp_controller --ros-args \

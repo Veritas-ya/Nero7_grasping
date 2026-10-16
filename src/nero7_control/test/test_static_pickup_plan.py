@@ -1,5 +1,4 @@
 """Pickup acceptance is independent of placement; transfer still needs preflight."""
-from concurrent.futures import Future
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -47,9 +46,11 @@ def pickup(tmp_path):
     actor._actual = lambda: (seed[:3].copy(), Rotation.identity())
     actor.bin_profile = dict(configured=True)  # No placement geometry needed here.
     actor.bin_workspace = dict(actor.node._p['workspace'])
-    actor.bin_planner = Mock()
+    actor.rrt = Mock()
     actor._motion_time = lambda: 100.
     actor.motion_issued = False
+    actor.gripper_feedback = Mock()
+    actor.gripper_feedback.reading.return_value = .04
     track = SimpleNamespace(id=7, centroid_x=-.36, centroid_y=.2,
                             centroid_z=-.09, belt_z=-.125)
     result = dict(center=[-.36, .2, -.09], yaw=0., raw_width_mm=30.,
@@ -59,7 +60,7 @@ def pickup(tmp_path):
 
 def test_pickup_accepts_without_evaluating_bin_route(pickup):
     actor, result, track = pickup
-    with patch('nero7_control.static_once.plan_fixed_bin',
+    with patch('nero7_control.static_once.fixed_bin_targets',
                side_effect=ValueError('Bin route unreachable')) as placement:
         plan = actor._make_plan(result, track)
     placement.assert_not_called()
@@ -114,22 +115,24 @@ def test_unreachable_pickup_pose_still_rejects(pickup, stage):
         actor._make_plan(result, track)
 
 
-def test_placement_preflight_uses_measured_joints_after_lift(pickup):
+def test_rrtconnect_uses_measured_joints_after_lift(pickup):
     actor, result, track = pickup
     actor.plan = actor._make_plan(result, track)
     measured = actor.plan['joints'][2].copy()
     measured[6] += .2  # Cartesian execution may select another redundant IK seed.
     actor._require_bin_holding = Mock()
     actor._require_bin_pose = Mock(return_value=measured)
-    actor._begin_bin_replan()
-    actor._require_bin_pose.assert_called_once_with(actor.plan['lift'], actor.plan['rotation'])
-    args = actor.bin_planner.submit.call_args.args
-    from nero7_control.fixed_bin import plan_fixed_bin
-    assert args[0] is plan_fixed_bin
-    np.testing.assert_allclose(args[2], measured)
-    assert args[4] is actor.bin_profile
-    assert actor.plan['placement'] is None
-    assert actor.state == 'STATIC_BIN_REPLAN'
+    target = np.array([.1, -.2, .3, .4, -.5, .6, -.7])
+    placement = dict(above_joints=target)
+    with patch('nero7_control.static_once.fixed_bin_targets', return_value=placement):
+        actor._begin_rrtconnect()
+    actor._require_bin_pose.assert_called_once_with(
+        actor.plan['lift'], actor.plan['rotation'])
+    np.testing.assert_allclose(actor.rrt.begin.call_args.args[0], measured)
+    np.testing.assert_allclose(actor.rrt.begin.call_args.args[1], target)
+    assert actor.rrt.begin.call_args.kwargs['gripper_width'] == actor.gripper_feedback.reading.return_value
+    assert actor.plan['placement'] is placement
+    assert actor.state == 'STATIC_RRTCONNECT_BIN_PLAN'
     actor.arm.move_j.assert_not_called()
     actor.arm.move_l.assert_not_called()
 
@@ -137,20 +140,18 @@ def test_placement_preflight_uses_measured_joints_after_lift(pickup):
 def test_failed_deferred_placement_stops_before_transfer(pickup):
     actor, result, track = pickup
     actor.plan = actor._make_plan(result, track)
-    actor.state, actor.started = 'STATIC_BIN_REPLAN', 100.
+    actor.state, actor.started = 'STATIC_RRTCONNECT_BIN_PLAN', 100.
     actor.motion_issued = True  # Pickup has already executed.
     actor._fresh = lambda: True
     actor.status = SimpleNamespace(err_status=0, arm_status=0)
     actor.node.get_clock().now.return_value = SimpleNamespace(nanoseconds=100_000_000_000)
     actor._require_bin_holding = Mock()
-    actor._bin_transfer = Mock()
-    actor.bin_plan_future = Future()
-    actor.bin_plan_future.set_exception(ValueError('Bin route unreachable'))
+    actor.rrt.busy = True
+    actor.rrt.poll.side_effect = ValueError('RRTConnect route unreachable')
     with patch('nero7_control.static_once.fixed_bin_profile_current', return_value=True):
         actor.tick()
     assert actor.state == 'STATIC_ABORT'
-    assert actor.failure == 'Bin route unreachable'
-    actor._bin_transfer.assert_not_called()
+    assert actor.failure == 'RRTConnect route unreachable'
     actor.arm.move_j.assert_not_called()
     actor.arm.move_l.assert_not_called()
     actor.arm.move_gripper.assert_not_called()

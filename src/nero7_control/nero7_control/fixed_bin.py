@@ -45,6 +45,33 @@ def fixed_bin_profile_current(profile):
         return False
 
 
+def fixed_bin_targets(kin, tcp, profile, workspace):
+    """Validate taught bin endpoints without inventing a transfer route."""
+    if profile is None:
+        raise ValueError('Fixed material bin has not been taught')
+    if profile['pose_type'] != 'joints':
+        raise ValueError('RRTConnect fixed-bin mode requires taught joint endpoints')
+    tcp = np.asarray(tcp, float)
+    above_q = require_limits(kin, profile['above_joints_rad']).copy()
+    release_q = require_limits(kin, profile['release_joints_rad']).copy()
+    above, rotation = _point(kin, above_q, tcp, workspace)
+    release, release_rotation = _point(kin, release_q, tcp, workspace)
+    if (np.linalg.norm(above[:2]-release[:2]) > .01
+            or (rotation.inv()*release_rotation).magnitude() > .01
+            or above[2]-release[2] < .05-1e-9):
+        raise ValueError(
+            'Bin above/release must share XY/orientation and have >= 50 mm vertical clearance')
+    initial = None
+    if profile.get('initial_joints_rad') is not None:
+        initial = require_limits(kin, profile['initial_joints_rad']).copy()
+        _point(kin, initial, tcp, workspace)
+    return dict(profile_path=profile['profile_path'], profile_sha256=profile['sha256'],
+                above=above, release=release, rotation=rotation,
+                above_joints=above_q, release_joints=release_q,
+                initial_joints=initial,
+                path_check='MoveIt OMPL RRTConnect + non-empty camera OctoMap')
+
+
 def _point(kin,q,tcp,workspace):
     q=require_limits(kin,q)
     T=kin.fk(q);flange=T[:3,3]
